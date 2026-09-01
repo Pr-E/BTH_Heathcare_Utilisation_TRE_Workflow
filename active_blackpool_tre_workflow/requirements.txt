@@ -1,0 +1,10 @@
+pandas>=2.2
+numpy>=2.0
+PyYAML>=6.0
+scipy>=1.13
+scikit-learn>=1.5
+statsmodels>=0.14
+matplotlib>=3.8
+joblib>=1.4
+# Optional only when TRE source files are Parquet:
+# pyarrow>=16

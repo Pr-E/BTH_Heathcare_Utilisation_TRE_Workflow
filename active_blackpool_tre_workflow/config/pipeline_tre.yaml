@@ -1,0 +1,223 @@
+# =============================================================================
+# Active Blackpool / BTH - REAL TRE source pipeline configuration
+# =============================================================================
+# The source register below defines the six approved BTH extracts, canonical
+# filenames and identifier candidates used by this workflow.
+#
+# IMPORTANT ABOUT SHA-256 FIELDS
+# ------------------------------
+# Some ED extracts contain SHA-256 columns whose labels do not reliably reveal
+# whether they are the patient hash or attendance hash.  The workflow therefore
+# verifies candidate patient identifiers by observed overlap with the matching
+# MSK cohort before patient/event-key cleaning or linkage.  Only aggregate QA
+# counts and selected *column names* are written; hash values are never exported.
+
+project:
+  name: active_blackpool_bth_tre
+
+data_source:
+  mode: tre
+  # The six approved BTH extracts are exposed through the TRE read-only mount.
+  # Source files are read from this location and are never modified in place.
+  # Change this path only if the TRE administrator provides a different approved
+  # source mount.
+  tre_dir: /project/readonly
+
+ingestion:
+  # Real extracts may contain approved fields beyond the analytical minimum.
+  # Required canonical fields must be present, but extra fields are retained and
+  # reported rather than causing an unnecessary first-run failure.
+  strict_schema: false
+  preserve_extra_columns: true
+  csv:
+    low_memory: false
+    encoding: utf-8
+    sep: ","
+
+identifier_resolution:
+  # Block if none of the candidate patient hashes overlaps the corresponding MSK
+  # cohort, or if two candidates have exactly the same best overlap.  This turns
+  # linkage ambiguity into an explicit data-quality decision rather than a silent
+  # assumption.
+  fail_if_no_reference_overlap: true
+  fail_if_ambiguous: true
+
+cleaning:
+  normalize_blank_strings: true
+  drop_fully_blank_rows: true
+  drop_exact_duplicates: true
+  ed_drop_duplicate_patient_event_keys: true
+
+  # ED validity checks. Confirm sentinel values and permitted ranges against the
+  # BTH source documentation before the first patient-level run.
+  ed_age_sentinels: [999, 9999]
+  ed_age_valid_min: 0
+  ed_age_valid_max: 120
+  ed_invalid_departure_years: [1900, 2099]
+
+# -----------------------------------------------------------------------------
+# MISSINGNESS AUDIT RULES
+# -----------------------------------------------------------------------------
+# Stage 02 does NOT impute values.  It converts source blanks/malformed values to
+# explicit missing values, quantifies them by column and source family, and flags
+# fields for review.  Missingness is never labelled "structural" purely because
+# the percentage is high; classifications below reflect study/source semantics.
+missingness:
+  print_top_n: 10
+  print_top_group_differences_n: 12
+  review_threshold_pct: 20.0
+  group_difference_alert_pp: 5.0
+
+  # Core analytical timestamps are critical because the downstream study design
+  # cannot reconstruct index/window placement or hospital events without them.
+  critical_columns_by_table:
+    msk_wider: [FirstMSKReferralDate, FirstMSKDate]
+    msk_sports: [FirstMSKReferralDate, FirstMSKDate]
+    inpatient_wider: [AdmissionDate]
+    inpatient_sports: [AdmissionDate]
+    ed_wider: [ArrivalDateTime]
+    ed_sports: [ArrivalDateTime]
+
+  rules:
+    # DateOfDeath is expected to be blank for people without a recorded death.
+    msk_wider:
+      DateOfDeath:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a recorded death is present in the source."
+    msk_sports:
+      DateOfDeath:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a recorded death is present in the source."
+      NewMSKReferralDate:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a subsequent MSK referral is recorded."
+      NewMSK_TargetOrganisationName:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a subsequent MSK referral is recorded."
+      NewMSKReferralObservationId:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a subsequent MSK referral is recorded."
+      NewOtherReferralDate:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a subsequent non-MSK referral is recorded."
+      NewOther_TargetOrganisationName:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a subsequent non-MSK referral is recorded."
+      NewOtherReferralObservationId:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a subsequent non-MSK referral is recorded."
+    inpatient_wider:
+      DateOfDeath:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a recorded death is present in the source."
+    inpatient_sports:
+      DateOfDeath:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a recorded death is present in the source."
+    ed_wider:
+      DateOfDeath:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a recorded death is present in the source."
+    ed_sports:
+      DateOfDeath:
+        classification: CONDITIONAL_EXPECTED
+        reason: "Only populated when a recorded death is present in the source."
+
+outputs:
+  overwrite: true
+  ingested_dir: data/01_ingested
+  cleaned_dir: data/02_cleaned
+  processed_dir: data/03_processed
+  qa_dir: outputs/qa
+
+# -----------------------------------------------------------------------------
+# REAL TRE SOURCE REGISTER
+# -----------------------------------------------------------------------------
+# Canonical keys are kept stable for the downstream code. `tre_dataset_key`
+# records the source-register terminology used for each extract.
+# `patient_id` / `event_id` are the existing preferred fields. Candidate lists
+# are retained so the workflow can verify them empirically on every extract.
+
+tables:
+  msk_wider:
+    tre_dataset_key: msk_without_sports
+    filename: active_blackpool_msk_cohort_without_sports.csv
+    canonical_filename: msk_wider.csv
+    format: csv
+    type: msk
+    population: wider
+    patient_id: sha256_hash
+    patient_id_candidates: [sha256_hash, sha256_hash_nhs_no]
+    reference_cohort: null
+    column_mapping: {}
+
+  inpatient_wider:
+    tre_dataset_key: inpatient_msk
+    filename: active_blackpool_inpatient_msk_.csv
+    canonical_filename: inpatient_wider.csv
+    format: csv
+    type: inpatient
+    population: wider
+    patient_id: sha256_hash
+    patient_id_candidates: [sha256_hash, sha256_hash_nhs_no]
+    reference_cohort: msk_wider
+    spell_id: SpellID
+    episode_id: EpisodeId
+    column_mapping: {}
+
+  ed_wider:
+    tre_dataset_key: msk_without_sports_ed
+    filename: active_blackpool_msk_cohort_without_sports_ed.csv
+    canonical_filename: ed_wider.csv
+    format: csv
+    type: ed
+    population: wider
+    # Preferred source candidate. The workflow verifies it against msk_wider
+    # rather than trusting the hash-column label alone.
+    patient_id: sha256_hash_aeattendno
+    patient_id_candidates: [sha256_hash_aeattendno, sha256_hash_nhs_no, sha256_hash]
+    event_id: sha256_hash_nhs_no
+    event_id_candidates: [sha256_hash_nhs_no, sha256_hash_aeattendno]
+    reference_cohort: msk_wider
+    column_mapping: {}
+
+  msk_sports:
+    tre_dataset_key: only_msk_sports
+    filename: active_blackpool_only_msk_sports.csv
+    canonical_filename: msk_sports.csv
+    format: csv
+    type: msk
+    population: sports
+    patient_id: sha256_hash_nhs_no
+    patient_id_candidates: [sha256_hash_nhs_no, sha256_hash]
+    reference_cohort: null
+    column_mapping: {}
+
+  inpatient_sports:
+    tre_dataset_key: inpatient_msk_sports
+    filename: active_blackpool_inpatient_msk_sports.csv
+    canonical_filename: inpatient_sports.csv
+    format: csv
+    type: inpatient
+    population: sports
+    patient_id: sha256_hash
+    patient_id_candidates: [sha256_hash, sha256_hash_nhs_no]
+    reference_cohort: msk_sports
+    spell_id: SpellID
+    episode_id: EpisodeId
+    column_mapping: {}
+
+  ed_sports:
+    tre_dataset_key: only_msk_sports_ed
+    filename: active_blackpool_only_msk_sports_ed.csv
+    canonical_filename: ed_sports.csv
+    format: csv
+    type: ed
+    population: sports
+    # Preferred source candidate; verified by overlap with msk_sports.
+    patient_id: sha256_hash_aeattendno
+    patient_id_candidates: [sha256_hash_aeattendno, sha256_hash_nhs_no, sha256_hash]
+    event_id: sha256_hash_nhs_no
+    event_id_candidates: [sha256_hash_nhs_no, sha256_hash_aeattendno]
+    reference_cohort: msk_sports
+    column_mapping: {}
