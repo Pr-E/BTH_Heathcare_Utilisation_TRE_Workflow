@@ -287,8 +287,8 @@ def run_outcome_features(
         ],
     )
     wide.columns = [
-        f"{'Baseline' if period == 'Baseline' else 'FollowUp'}{metric}"
-        for metric, period in wide.columns
+        f"{'Baseline' if period == 'Baseline' else 'FollowUp'}{outcome_name}"
+        for outcome_name, period in wide.columns
     ]
     wide = wide.reset_index()
 
@@ -332,25 +332,25 @@ def run_outcome_features(
 
     for prefix in ("Baseline", "FollowUp"):
         py_col = f"{prefix}PersonYears"
-        for metric in (
+        for outcome_name in (
             "ED",
             "Inpatient",
             "EmergencyInpatient",
             "TotalHospital",
         ):
-            count_col = f"{prefix}{metric}Count"
-            rate_col = f"{prefix}{metric}RatePerPY"
+            count_col = f"{prefix}{outcome_name}Count"
+            rate_col = f"{prefix}{outcome_name}RatePerPY"
             denom = patient[py_col].replace(0, np.nan)
             patient[rate_col] = patient[count_col] / denom
 
-    for metric in (
+    for outcome_name in (
         "ED",
         "Inpatient",
         "EmergencyInpatient",
         "TotalHospital",
     ):
-        patient[f"AnyFollowUp{metric}Flag"] = (
-            patient[f"FollowUp{metric}Count"].gt(0).astype("Int64")
+        patient[f"AnyFollowUp{outcome_name}Flag"] = (
+            patient[f"FollowUp{outcome_name}Count"].gt(0).astype("Int64")
         )
 
     event_counts = pd.DataFrame([
