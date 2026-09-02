@@ -7,8 +7,7 @@ construction and are used only afterwards for descriptive profiling.
 Candidate cluster solutions are evaluated using separation, minimum-size and
 stability diagnostics. A prespecified K=4 is retained only when it satisfies
 the configured criteria; otherwise the workflow follows the configured
-selection/failure rule. Cluster centroids are estimated from the data supplied
-to the current run.
+selection/failure rule.
 """
 from __future__ import annotations
 
