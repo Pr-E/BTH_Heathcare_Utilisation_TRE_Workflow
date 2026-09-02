@@ -907,73 +907,90 @@ def _save_grouped_horizontal_bar(
     plt.close(fig)
 
 
-def _plot_age_distribution(df: pd.DataFrame, path: Path) -> None:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    fig, ax = plt.subplots(figsize=(10.5, 6.2))
-    bins = np.arange(15, 101, 5)
-    for flag, sub in df.groupby(EXPOSURE_COL):
-        values = _numeric(sub["AgeAtIndex"]).dropna()
-        if values.empty:
-            continue
-        group = str(sub[GROUP_COL].iloc[0])
-        ax.hist(
+
+
+def _plot_utilisation_rates(
+    utilisation: pd.DataFrame,
+    figure_dir: Path,
+) -> list[dict[str, str]]:
+    """Plot all crude baseline/follow-up utilisation rates in one comparison figure."""
+    if utilisation.empty:
+        return []
+
+    outcome_order = ["ED", "Inpatient", "EmergencyInpatient", "TotalHospital"]
+    outcome_labels = {
+        "ED": "ED",
+        "Inpatient": "Inpatient",
+        "EmergencyInpatient": "Emergency inpatient",
+        "TotalHospital": "Total hospital",
+    }
+
+    # Use the two pathway groups in a fixed order so the figure is stable across runs.
+    series_specs = [
+        (0, "Baseline", "Wider MSK baseline", "#2F7FB8"),
+        (0, "FollowUp", "Wider MSK follow-up", "#F28E2B"),
+        (1, "Baseline", "Sports-linked baseline", "#2CA02C"),
+        (1, "FollowUp", "Sports-linked follow-up", "#D62728"),
+    ]
+
+    x = np.arange(len(outcome_order), dtype=float)
+    width = 0.19
+    offsets = np.array([-1.5, -0.5, 0.5, 1.5]) * width
+
+    fig, ax = plt.subplots(figsize=(11.2, 6.4))
+
+    for offset, (flag, period, label, colour) in zip(offsets, series_specs):
+        values = []
+        for outcome in outcome_order:
+            row = utilisation[
+                utilisation[EXPOSURE_COL].eq(flag)
+                & utilisation["period"].eq(period)
+                & utilisation["outcome"].eq(outcome)
+            ]
+            values.append(
+                float(row["rate_per_100_person_years"].iloc[0])
+                if not row.empty
+                else np.nan
+            )
+
+        ax.bar(
+            x + offset,
             values,
-            bins=bins,
-            density=True,
-            histtype="step",
-            linewidth=2.6,
-            color=GROUP_COLOURS.get(int(flag), NEUTRAL_GREY),
-            label=f"{group} (n={len(values):,})",
+            width=width,
+            label=label,
+            color=colour,
         )
-        ax.axvline(
-            values.median(),
-            linestyle="--",
-            linewidth=1.4,
-            color=GROUP_COLOURS.get(int(flag), NEUTRAL_GREY),
-            alpha=0.9,
-        )
-    _style_axis(ax, title="Age distribution at the analytical index", xlabel="Age at index (years)", ylabel="Density")
-    ax.legend(frameon=False, title="Analysis group")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([outcome_labels[o] for o in outcome_order])
+    _style_axis(
+        ax,
+        title="Crude baseline and follow-up healthcare-utilisation rates",
+        xlabel="",
+        ylabel="Events per 100 person-years",
+    )
+    ax.legend(frameon=False, ncol=2, loc="upper left")
+    ax.set_ylim(bottom=0)
     fig.tight_layout()
-    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
+
+    filename = "crude_utilisation_rates.png"
+    fig.savefig(
+        figure_dir / filename,
+        dpi=220,
+        bbox_inches="tight",
+        facecolor="white",
+    )
     plt.close(fig)
 
-
-
-
-
-
-def _plot_utilisation_rates(utilisation: pd.DataFrame, figure_dir: Path) -> list[dict[str, str]]:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    manifest: list[dict[str, str]] = []
-    for outcome in OUTCOME_METRICS:
-        x = utilisation[utilisation["outcome"].eq(outcome)].copy()
-        if x.empty:
-            continue
-        groups = list(dict.fromkeys(x["group"].astype(str)))
-        fig, ax = plt.subplots(figsize=(10.5, 6.2))
-        y = np.arange(len(groups))
-        height = 0.34
-        for period, offset in [("Baseline", -height/2), ("FollowUp", height/2)]:
-            values = []
-            for group in groups:
-                z = x[(x["group"].astype(str).eq(group)) & (x["period"].eq(period))]
-                values.append(float(z["rate_per_person_year"].iloc[0]) if not z.empty else np.nan)
-            bars = ax.barh(y + offset, values, height=height, color=PERIOD_COLOURS[period], label=period)
-            for bar, val in zip(bars, values):
-                if np.isfinite(val):
-                    ax.text(val + 0.01, bar.get_y()+bar.get_height()/2, f"{val:.3f}", va="center", fontsize=9)
-        ax.set_yticks(y)
-        ax.set_yticklabels(groups)
-        _style_axis(ax, title=f"{DISPLAY_LABELS.get(outcome, outcome)}: baseline vs follow-up", xlabel="Crude events per person-year")
-        ax.legend(frameon=False, title="Period")
-        ax.set_xlim(left=0)
-        fig.tight_layout()
-        filename = f"utilisation_{_slug(outcome)}_baseline_followup.png"
-        fig.savefig(figure_dir / filename, dpi=220, bbox_inches="tight", facecolor="white")
-        plt.close(fig)
-        manifest.append({"file": filename, "purpose": f"Baseline and follow-up crude {outcome} rates by analysis group."})
-    return manifest
+    return [
+        {
+            "file": filename,
+            "purpose": (
+                "Crude baseline and follow-up ED, inpatient, emergency inpatient "
+                "and total hospital rates by analysis group."
+            ),
+        }
+    ]
 
 
 def _plot_baseline_smd(balance: pd.DataFrame, path: Path, top_n: int = 20) -> None:
@@ -1064,7 +1081,7 @@ def _write_manifest(table_dir: Path, figure_manifest: list[dict[str, str]], tabl
         "followup_observation_summary": "Observed follow-up completeness and duration by analysis group.",
         "pathway_timing_summary": "Source-defined referral-to-FirstMSKDate and FirstMSKDate-to-LastMSKDate interval distributions.",
         "pathway_timing_qa": "Temporal interval QA including negative/zero intervals.",
-        "utilisation_summary": "Baseline/follow-up event burden, zero inflation, dispersion and crude rates.",
+        "utilisation_summary": "Baseline/follow-up event burden, zero inflation, dispersion and crude rates; the four outcomes are displayed together in one crude-rate figure.",
         "prepost_change_summary": "Within-group crude baseline-to-follow-up utilisation changes.",
         "index_annual_summary": "Annual analytical-index distribution by group.",
         "index_monthly_summary": "Monthly analytical-index distribution by group.",
@@ -1243,10 +1260,8 @@ def run_descriptive(
 
     figure_manifest: list[dict[str, str]] = []
 
-    _plot_age_distribution(eligible, figure_dir / "age_distribution.png")
-    figure_manifest.append({"file": "age_distribution.png", "purpose": "Age distribution at the analytical index by analysis group."})
-
     demographic_plots = [
+        ("AgeBand", "age_band_distribution.png", "Age-band distribution by analysis group", None),
         ("Sex", "sex_distribution.png", "Sex distribution by analysis group", None),
         ("EthnicityNationalCodeDesc", "ethnicity_distribution.png", "Recorded ethnicity profile by analysis group", 10),
         ("IMDQuintile", "imd_quintile_distribution.png", "Deprivation profile by analysis group", None),
