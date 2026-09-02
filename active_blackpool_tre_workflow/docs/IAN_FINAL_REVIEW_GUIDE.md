@@ -176,7 +176,6 @@ Before TRE execution, confirm:
 - [ ] Patient/event identifier candidate lists reflect source knowledge.
 - [ ] Real extract start/end coverage dates are entered.
 - [ ] `FirstMSKDate` analytical semantics are confirmed or revised.
-- [ ] Emergency `MethodOfAdmission` patterns are checked against real source values.
 - [ ] Propensity covariates remain pre-index only.
 - [ ] ATT balance threshold remains appropriate.
 - [ ] Primary/sensitivity model hierarchy is accepted.
