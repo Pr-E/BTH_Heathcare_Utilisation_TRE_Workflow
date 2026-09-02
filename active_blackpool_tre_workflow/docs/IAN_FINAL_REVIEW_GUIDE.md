@@ -176,4 +176,5 @@ The aim is for the complete analytical run to be understandable without relying 
 
 ## Outcome of the review
 
-Once reviewed, the intention is to make any final configuration changes required and then ingress the workflow into the TRE for the real-data run.
+The aim of the review is to confirm that the workflow is methodologically and technically robust for TRE execution, and to resolve any remaining source-specific assumptions before the real-data run.
+
