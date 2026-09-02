@@ -194,6 +194,4 @@ Before TRE execution, I would like to confirm:
 
 ## Outcome of the review
 
-The main outcome I would like is agreement that the workflow is technically and methodologically appropriate for TRE execution, together with confirmation of the remaining source-specific assumptions.
-
-Once these are agreed, I can make any final configuration changes and proceed with the real-data TRE run.
+Once those points are agreed, the intention is to make any final configuration changes required and then ingress the workflow into the TRE for the real-data run.
