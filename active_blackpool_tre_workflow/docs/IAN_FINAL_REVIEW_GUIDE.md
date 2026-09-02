@@ -184,4 +184,4 @@ Before TRE execution, confirm:
 - [ ] Missingness classifications in `pipeline_tre.yaml` are source-supported.
 - [ ] Formal disclosure-control process is understood and separate from Stage 10.
 
-Once these items are agreed, the code should be ingressed and executed stage-by-stage rather than relying on one opaque notebook run.
+Once these items are agreed, the code should be ingressed and executed stage-by-stage.
