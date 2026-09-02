@@ -4,7 +4,7 @@
 
 This package is the final **real-data translation workflow** intended for review before ingress into the Trusted Research Environment (TRE). It does not carry synthetic results into the real analysis. It carries the validated **analytical architecture**, explicit assumptions, decision gates, code comments, aggregate audit logging and reproducibility controls required to regenerate all findings from the approved BTH extracts.
 
-The review should answer four questions:
+The review should answer three questions:
 
 1. Are the six real BTH source files and identifier semantics represented correctly?
 2. Are the cohort, propensity, comparative and clustering specifications methodologically appropriate?
