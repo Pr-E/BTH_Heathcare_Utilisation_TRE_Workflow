@@ -1,185 +1,199 @@
-# Ian final review guide — Active Blackpool / BTH TRE workflow
+# Ian Final Review Guide — Active Blackpool / BTH TRE Workflow
 
-## Purpose of this review
+## Purpose
 
-This package is the final **real-data translation workflow** intended for review before ingress into the Trusted Research Environment (TRE). It does not carry synthetic results into the real analysis. It carries the validated **analytical architecture**, explicit assumptions, decision gates, code comments, aggregate audit logging and reproducibility controls required to regenerate all findings from the approved BTH extracts.
+This package contains the final real-data workflow I am proposing to take into the BTH Trusted Research Environment (TRE).
 
-The review should answer three questions:
+The synthetic workflow has been used to develop and test the analytical process only. No synthetic results, fitted models or cluster centroids will be carried into the TRE. The real analysis will be rebuilt from the approved BTH extracts.
 
-1. Are the six real BTH source files and identifier semantics represented correctly?
-2. Are the cohort, propensity, comparative and clustering specifications methodologically appropriate?
-3. Are the logs and audit outputs sufficient for another analyst to understand exactly what happened at every stage without relying on undocumented notebook state?
+The main things I would like this review to confirm are:
 
----
-
-## Current real-data interpretation boundary
-
-The workflow is configured for:
-
-- **Sports-linked BTH pathway** patients; versus
-- **Wider MSK non-Sports-linked candidate** patients.
-
-`FirstMSKDate` remains a **source-relative analytical time origin** until its real-data meaning is confirmed. It must not be described as programme start by default.
-
-The package therefore estimates an **adjusted comparative pre/post association in healthcare-utilisation rates**, not a confirmed causal Active Blackpool treatment effect.
-
-Two preflight items remain intentionally unresolved and should block execution until confirmed inside the TRE:
-
-- the approved real BTH extract coverage dates (`study_start_date`, `study_end_date`); and
-- the analytical semantics of `FirstMSKDate` (`analytical_index_semantics_confirmed_for_workflow`).
-
-This is intentional safety behaviour, not an incomplete code implementation.
+1. Are the six real BTH source files, fields and identifier assumptions represented correctly?
+2. Are the cohort, propensity-adjustment, comparative modelling and clustering methods appropriate?
+3. Is the workflow sufficiently clear and auditable for another analyst to reproduce and review?
 
 ---
 
-## Real source register
+## Current interpretation
 
-The configured six source files are:
+The analysis currently compares:
 
-| Analytical source | TRE filename |
-|---|---|
-| Wider MSK cohort | `active_blackpool_msk_cohort_without_sports.csv` |
-| Wider MSK inpatient | `active_blackpool_inpatient_msk_.csv` |
-| Wider MSK ED | `active_blackpool_msk_cohort_without_sports_ed.csv` |
-| Sports-linked MSK cohort | `active_blackpool_only_msk_sports.csv` |
-| Sports-linked inpatient | `active_blackpool_inpatient_msk_sports.csv` |
-| Sports-linked ED | `active_blackpool_only_msk_sports_ed.csv` |
+* **Sports-linked BTH pathway patients**
+* **Wider MSK non-Sports-linked candidate patients**
 
-The ED hash labels are not trusted by name alone. Stage 02 and Stage 03 re-resolve patient/event identifiers by aggregate overlap/uniqueness evidence against the corresponding MSK cohort and write the decision to QA files.
+Sports-linked pathway membership is **not currently treated as confirmed Active Blackpool programme participation**.
+
+`FirstMSKDate` is being used as a source-relative analytical index and should not be interpreted as programme start unless its operational meaning is confirmed.
+
+The primary analysis should therefore be described as:
+
+> An adjusted comparison of baseline-to-follow-up healthcare-utilisation changes between the Sports-linked BTH pathway and a comparable Wider MSK population.
+
+It should not currently be described as a causal Active Blackpool treatment effect.
+
+Two items deliberately remain unresolved before the TRE run:
+
+* approved extract start and end dates;
+* confirmation of the meaning of `FirstMSKDate`.
+
+The preflight stage is designed to stop the workflow if these remain unresolved.
 
 ---
 
-## Audit and review features
+## Real BTH source files
 
-### 1. Cleaning audit
+| Source                   | Expected TRE file                                   |
+| ------------------------ | --------------------------------------------------- |
+| Wider MSK cohort         | `active_blackpool_msk_cohort_without_sports.csv`    |
+| Wider MSK inpatient      | `active_blackpool_inpatient_msk_.csv`               |
+| Wider MSK ED             | `active_blackpool_msk_cohort_without_sports_ed.csv` |
+| Sports-linked MSK cohort | `active_blackpool_only_msk_sports.csv`              |
+| Sports-linked inpatient  | `active_blackpool_inpatient_msk_sports.csv`         |
+| Sports-linked ED         | `active_blackpool_only_msk_sports_ed.csv`           |
 
-Stage 02 reports, for every source table:
+Main files to review:
 
-- rows/columns after cleaning;
-- unique patient/event/spell counts;
-- rows removed as blank, exact duplicate or duplicate ED patient-event key;
-- chronology anomalies and other integrity flags;
-- total missing cells **and percentage**;
-- which columns are missing;
-- missing `n` and `%` per column;
-- configured missingness classification (`CRITICAL`, `STRUCTURAL_EXPECTED`, `CONDITIONAL_EXPECTED`, `UNCLASSIFIED`);
-- critical fields with missing values;
-- top missing columns requiring review;
-- Sports-linked vs Wider-MSK missingness differences in percentage points.
+* `config/pipeline_tre.yaml`
+* `docs/REAL_TRE_SOURCE_REGISTER.md`
 
-New Stage 02 files:
+The ED identifier logic is intentionally cautious. Candidate patient and event identifiers are rechecked against the real data using overlap and uniqueness evidence rather than relying only on column names.
 
-- `outputs/qa/02_column_missingness.csv`
-- `outputs/qa/02_missingness_group_comparison.csv`
+---
 
-Missingness is **not imputed during cleaning**. Stage 02 describes and standardises it; later modelling decisions handle analytical missingness only where justified.
+## Workflow review points
 
-### 2. Stage-specific key findings
+### Data preparation
 
-Terminal output is deliberately concise and decision-oriented. Detailed tables still go to CSV, while the terminal shows the findings that determine whether the analyst should proceed.
+Stages 02–06 check:
 
-Examples:
+* cleaning and missingness;
+* identifier resolution;
+* source linkage;
+* patient-spine construction;
+* cohort eligibility and exclusions;
+* baseline/follow-up windows;
+* ED, inpatient, emergency inpatient and total hospital-utilisation outcomes.
 
-- Stage 03: identifier re-verification, patient linkage, pathway-anchor completeness and episode-to-spell collapse;
-- Stage 04: patient-spine linkage, group-specific hospital-source coverage and demographic provenance;
-- Stage 05: eligible denominators, exclusions, observation window and index QA;
-- Stage 06: event-ledger counts, outcome rates, zero-event percentages;
-- Stage 07: largest unadjusted SMDs, missingness, crude baseline/follow-up rates;
-- Stage 08: positivity exclusions, common support, ATT ESS, SMD pass/fail, PSM balance and primary/sensitivity estimates;
-- Stage 09: K diagnostics, phenotype sizes, stability, Cramér's V and sparse Sports-linked phenotype warnings;
-- Stage 10: internal patient-level file flags and aggregate small-cell review flags.
+Missingness is described and classified during cleaning rather than automatically imputed.
 
-### 3. Explicit stage handoff
+### Descriptive analysis
 
-Every successful stage ends with an exact `NEXT STEP` command. If a decision gate fails, the log instead tells the analyst to **stop, review and rerun the failed stage**.
+Stage 07 summarises:
 
-### 4. Aggregate stage summaries
+* population characteristics;
+* missingness;
+* baseline imbalance;
+* crude baseline and follow-up utilisation.
 
-Each stage writes both JSON and Markdown to:
+### Comparative analysis
+
+Stage 08 uses ATT propensity weighting as the primary adjustment approach.
+
+Key requirements:
+
+* propensity covariates remain **pre-index only**;
+* structural and empirical overlap are recalculated from the real data;
+* primary models proceed only when:
+
+`max |SMD| < 0.10`
+
+The primary model is an **ATT-weighted comparative pre/post Poisson GEE with a log-person-time offset**.
+
+Sensitivity analyses include:
+
+* Negative Binomial GEE;
+* 1:3 propensity-score matching;
+* follow-up-only supporting models.
+
+The key estimand is the **difference in baseline-to-follow-up change between groups**, not simply the difference in follow-up rates.
+
+### Clustering
+
+Stage 09 remains secondary and exploratory.
+
+Clusters are formed using baseline:
+
+* ED utilisation rate;
+* inpatient utilisation rate;
+* emergency inpatient utilisation rate.
+
+Demographics, pathway group and follow-up outcomes are used only afterwards to describe the clusters.
+
+K=4 is prespecified for reporting, but K=2–6 diagnostics are recalculated on the real data and K=4 must still meet the configured size and stability requirements.
+
+### Disclosure control
+
+The workflow's release checks are an **internal pre-screen only**.
+
+Formal TRE disclosure-control approval remains required before any output leaves the secure environment.
+
+---
+
+## Audit trail
+
+Each stage produces:
+
+* concise terminal findings;
+* detailed CSV QA outputs;
+* an aggregate JSON/Markdown stage summary;
+* a clear `NEXT STEP` command.
+
+Stage summaries are stored in:
 
 `outputs/audit/stage_summaries/`
 
-These contain only aggregate status, key findings, warnings, QA paths and next command.
-
-After a partial or complete run:
+A consolidated review summary can be generated with:
 
 ```bash
 python scripts/review_audit_summary.py
 ```
 
-creates:
+This produces:
 
-- `outputs/audit/reviewer_summary.csv`
-- `outputs/audit/reviewer_summary.md`
+* `outputs/audit/reviewer_summary.csv`
+* `outputs/audit/reviewer_summary.md`
 
-This gives a reviewer a complete run-status narrative without opening patient-level analytical files.
-
----
-
-## Main methodological decision gates
-
-### Cohort/index gate
-
-Do not run the full analysis until the approved source coverage period and index semantics are confirmed.
-
-### Positivity/overlap gate
-
-Real-data geography/source support is recalculated. Exclusions are recalculated from the current TRE data.
-
-### ATT balance gate
-
-The primary comparative models are blocked when post-ATT measured balance fails the configured criterion:
-
-`max |SMD| < 0.10`
-
-If balance fails, the workflow writes all design diagnostics first, records `BLOCKED_AT_BALANCE_GATE`, and stops before substantive model interpretation.
-
-### Sparse-event gate
-
-Count-model results are labelled or withheld when configured minimum event counts are not met, particularly for Negative Binomial models.
-
-### Clustering gate
-
-K=4 is a prespecified report-facing candidate, not a forced solution. K=2–6 diagnostics are recomputed and K=4 must satisfy the configured minimum size/stability requirements.
-
-### Disclosure gate
-
-Stage 10 is a **pre-screen only**. Formal local TRE disclosure-control approval remains mandatory before any output leaves the secure environment.
+The aim is for the complete analytical run to be understandable without relying on undocumented notebook state.
 
 ---
 
-## Recommended review order
+## Suggested review order
 
 1. `README.md`
-2. `config/pipeline_tre.yaml`
-3. `config/workflow_tre.yaml`
-4. `config/clustering_tre.yaml`
-5. `docs/REAL_TRE_SOURCE_REGISTER.md`
-6. `docs/ANALYSIS_SPECIFICATION.md`
-7. `docs/CODE_REVIEW_MAP.md`
-8. `docs/AUDIT_TRAIL_AND_LOGGING.md`
-9. `docs/TRE_STEP_BY_STEP_EXECUTION.md`
-10. `src/bth_analysis/data_pipeline/cleaning.py`
-11. `src/bth_analysis/analysis/propensity.py`
-12. `src/bth_analysis/analysis/comparative.py`
-13. `src/bth_analysis/analysis/clustering.py`
+2. `docs/IAN_FINAL_REVIEW_GUIDE.md`
+3. `config/pipeline_tre.yaml`
+4. `config/workflow_tre.yaml`
+5. `config/clustering_tre.yaml`
+6. `docs/REAL_TRE_SOURCE_REGISTER.md`
+7. `docs/ANALYSIS_SPECIFICATION.md`
+8. `docs/CODE_REVIEW_MAP.md`
+9. `docs/AUDIT_TRAIL_AND_LOGGING.md`
+10. `src/bth_analysis/analysis/propensity.py`
+11. `src/bth_analysis/analysis/comparative.py`
+12. `src/bth_analysis/analysis/clustering.py`
 
 ---
 
-## Review sign-off checklist
+## Main sign-off points
 
-Before TRE execution, confirm:
+Before TRE execution, I would like to confirm:
 
-- [ ] Six real source filenames are correct.
-- [ ] Source directory is correct for the approved workspace.
-- [ ] Patient/event identifier candidate lists reflect source knowledge.
-- [ ] Real extract start/end coverage dates are entered.
-- [ ] `FirstMSKDate` analytical semantics are confirmed or revised.
-- [ ] Propensity covariates remain pre-index only.
-- [ ] ATT balance threshold remains appropriate.
-- [ ] Primary/sensitivity model hierarchy is accepted.
-- [ ] Clustering remains explicitly secondary/exploratory.
-- [ ] Missingness classifications in `pipeline_tre.yaml` are source-supported.
-- [ ] Formal disclosure-control process is understood and separate from Stage 10.
+* [ ] the six source filenames and TRE source location;
+* [ ] patient and ED event identifier semantics;
+* [ ] real extract start and end dates;
+* [ ] the operational meaning of `FirstMSKDate`;
+* [ ] emergency `MethodOfAdmission` coding;
+* [ ] cohort eligibility and observation-window rules;
+* [ ] propensity covariates and ATT as the primary adjustment approach;
+* [ ] `max |SMD| < 0.10` as the balance requirement;
+* [ ] the Poisson GEE primary model and sensitivity hierarchy;
+* [ ] clustering as secondary/exploratory;
+* [ ] source-supported missingness classifications;
+* [ ] adequacy of the audit trail;
+* [ ] separation between the internal release screen and formal TRE disclosure approval.
 
-Once these items are agreed, the code should be ingressed and executed stage-by-stage.
+## Outcome of the review
+
+The main outcome I would like is agreement that the workflow is technically and methodologically appropriate for TRE execution, together with confirmation of the remaining source-specific assumptions.
+
+Once these are agreed, I can make any final configuration changes and proceed with the real-data TRE run.
