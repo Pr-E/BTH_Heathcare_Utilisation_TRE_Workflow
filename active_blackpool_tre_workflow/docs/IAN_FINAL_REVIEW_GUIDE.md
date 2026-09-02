@@ -8,9 +8,8 @@ The synthetic workflow has been used to develop and test the analytical process 
 
 The main things I would like this review to confirm are:
 
-1. Are the six real BTH source files, fields and identifier assumptions represented correctly?
-2. Are the cohort, propensity-adjustment, comparative modelling and clustering methods appropriate?
-3. Is the workflow sufficiently clear and auditable for another analyst to reproduce and review?
+1. Are the cohort, propensity-adjustment, comparative modelling and clustering methods appropriate?
+2. Is the workflow sufficiently clear and auditable for another analyst to reproduce and review?
 
 ---
 
