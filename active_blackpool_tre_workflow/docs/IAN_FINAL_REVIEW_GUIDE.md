@@ -174,24 +174,6 @@ The aim is for the complete analytical run to be understandable without relying 
 
 ---
 
-## Main sign-off points
-
-Before TRE execution, I would like to confirm:
-
-* [ ] the six source filenames and TRE source location;
-* [ ] patient and ED event identifier semantics;
-* [ ] real extract start and end dates;
-* [ ] the operational meaning of `FirstMSKDate`;
-* [ ] emergency `MethodOfAdmission` coding;
-* [ ] cohort eligibility and observation-window rules;
-* [ ] propensity covariates and ATT as the primary adjustment approach;
-* [ ] `max |SMD| < 0.10` as the balance requirement;
-* [ ] the Poisson GEE primary model and sensitivity hierarchy;
-* [ ] clustering as secondary/exploratory;
-* [ ] source-supported missingness classifications;
-* [ ] adequacy of the audit trail;
-* [ ] separation between the internal release screen and formal TRE disclosure approval.
-
 ## Outcome of the review
 
-Once those points are agreed, the intention is to make any final configuration changes required and then ingress the workflow into the TRE for the real-data run.
+Once reviewed, the intention is to make any final configuration changes required and then ingress the workflow into the TRE for the real-data run.
