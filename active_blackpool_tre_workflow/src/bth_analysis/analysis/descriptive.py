@@ -1,7 +1,7 @@
 """Stage 07: descriptive EDA, cohort characterisation and diagnostic figures.
 
-This layer describes who is in the analysis, missingness, source coverage,
-baseline utilisation, temporal patterns and crude rates.  It is deliberately
+This layer describes the analytical population, missingness, source coverage,
+pathway timing, baseline utilisation and crude baseline/follow-up rates. It is
 separate from propensity adjustment and outcome modelling so descriptive facts
 are not confused with adjusted associations.
 """
@@ -411,6 +411,36 @@ def _source_coverage(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _followup_observation_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Summarise observed follow-up in a compact table rather than a density plot."""
+    rows: list[dict[str, object]] = []
+    for (flag, group), sub in df.groupby([EXPOSURE_COL, GROUP_COL], dropna=False):
+        days = _numeric(sub.get("FollowUpDaysAvailable", pd.Series(np.nan, index=sub.index)))
+        full = _numeric(sub.get("FullFollowUpFlag", pd.Series(0, index=sub.index))).fillna(0).eq(1)
+        partial = days.notna() & ~full
+        zero_days = days.fillna(np.nan).eq(0)
+        rows.append(
+            {
+                "ExposureFlag": flag,
+                "group": group,
+                "eligible_patients": int(sub["PatientID"].nunique()),
+                "followup_days_available_n": int(days.notna().sum()),
+                "median_followup_days": float(days.median()) if days.notna().any() else np.nan,
+                "q1_followup_days": float(days.quantile(0.25)) if days.notna().any() else np.nan,
+                "q3_followup_days": float(days.quantile(0.75)) if days.notna().any() else np.nan,
+                "min_followup_days": float(days.min()) if days.notna().any() else np.nan,
+                "max_followup_days": float(days.max()) if days.notna().any() else np.nan,
+                "full_365_day_followup_n": int(full.sum()),
+                "full_365_day_followup_pct": _safe_pct(full.sum(), len(sub)),
+                "partial_followup_n": int(partial.sum()),
+                "partial_followup_pct": _safe_pct(partial.sum(), len(sub)),
+                "zero_followup_days_n": int(zero_days.sum()),
+                "zero_followup_days_pct": _safe_pct(zero_days.sum(), len(sub)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _pathway_timing(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Summarise referral/MSK timing intervals and chronology-related descriptive measures."""
     temp = df.copy()
@@ -615,130 +645,12 @@ def _event_structure(
     return structure, monthly
 
 
-def _expand_event_outcomes(ledger: pd.DataFrame) -> pd.DataFrame:
-    """Expand event-ledger rows into the configured outcome categories for aggregate summaries."""
-    frames: list[pd.DataFrame] = []
-    base_cols = ["PatientID", EXPOSURE_COL, "RelativeDay", "EventID"]
-
-    ed = ledger[ledger["EventType"].eq("ED")][base_cols].copy()
-    ed["Outcome"] = "ED"
-    frames.append(ed)
-
-    ip = ledger[ledger["EventType"].eq("Inpatient")][base_cols].copy()
-    ip["Outcome"] = "Inpatient"
-    frames.append(ip)
-
-    emer = ledger[
-        ledger["EventType"].eq("Inpatient")
-        & _numeric(ledger["EmergencyInpatientFlag"]).fillna(0).gt(0)
-    ][base_cols].copy()
-    emer["Outcome"] = "EmergencyInpatient"
-    frames.append(emer)
-
-    total = ledger[base_cols].copy()
-    total["Outcome"] = "TotalHospital"
-    frames.append(total)
-
-    return pd.concat(frames, ignore_index=True)
 
 
-def _overlap_days(lo: float, hi: float, available_before: float, available_after: float) -> float:
-    """Calculate the number of observed days overlapping two time intervals."""
-    if hi <= 0:
-        observed_lo = -max(available_before, 0.0)
-        observed_hi = 0.0
-    elif lo >= 0:
-        observed_lo = 0.0
-        observed_hi = max(available_after, 0.0)
-    else:
-        return 0.0
-    return max(0.0, min(hi, observed_hi) - max(lo, observed_lo))
 
 
-def _relative_time_rates(
-    ledger: pd.DataFrame,
-    eligible: pd.DataFrame,
-    bin_days: int = 30,
-) -> pd.DataFrame:
-    """Calculate aggregate utilisation trajectories in bins relative to the analytical index."""
-    if ledger.empty:
-        return pd.DataFrame()
-
-    edges = list(np.arange(-360, 361, bin_days, dtype=float))
-    if edges[0] > -365:
-        edges.insert(0, -365.0)
-    if edges[-1] < 365:
-        edges.append(365.0)
-    edges = np.array(sorted(set(edges)), dtype=float)
-
-    event = ledger.merge(
-        eligible[["PatientID", GROUP_COL, "AnalysisEligibleFlag"]].drop_duplicates("PatientID"),
-        on="PatientID",
-        how="inner",
-        validate="many_to_one",
-    )
-    event = event[event["AnalysisEligibleFlag"].eq(1)].copy()
-    event = event[event["AnalysisPeriod"].isin(["Baseline", "Follow-up"])].copy()
-    event = _expand_event_outcomes(event)
-    event["TimeBin"] = pd.cut(event["RelativeDay"], bins=edges, right=False, include_lowest=True)
-
-    event_counts = (
-        event.dropna(subset=["TimeBin"])
-        .groupby([EXPOSURE_COL, "Outcome", "TimeBin"], observed=True)
-        .size()
-        .rename("events")
-        .reset_index()
-    )
-
-    pt_rows: list[dict[str, object]] = []
-    for flag, sub in eligible.groupby(EXPOSURE_COL):
-        before = _numeric(sub.get("BaselineDaysAvailable", pd.Series(0, index=sub.index))).fillna(0)
-        after = _numeric(sub.get("FollowUpDaysAvailable", pd.Series(0, index=sub.index))).fillna(0)
-        for lo, hi in zip(edges[:-1], edges[1:]):
-            days = sum(_overlap_days(lo, hi, b, a) for b, a in zip(before, after))
-            pt_rows.append(
-                {
-                    EXPOSURE_COL: flag,
-                    "TimeBin": pd.Interval(lo, hi, closed="left"),
-                    "person_days": days,
-                    "person_years": days / 365.25,
-                    "bin_start_day": lo,
-                    "bin_end_day": hi,
-                    "bin_mid_day": (lo + hi) / 2,
-                }
-            )
-    pt = pd.DataFrame(pt_rows)
-
-    outcomes = pd.DataFrame({"Outcome": list(OUTCOME_METRICS)})
-    pt = pt.merge(outcomes, how="cross")
-    out = pt.merge(event_counts, on=[EXPOSURE_COL, "Outcome", "TimeBin"], how="left")
-    out["events"] = out["events"].fillna(0).astype(int)
-    out["rate_per_100_person_years"] = np.where(
-        out["person_years"].gt(0), out["events"] / out["person_years"] * 100, np.nan
-    )
-    lookup = _group_lookup(eligible)
-    out["group"] = out[EXPOSURE_COL].map(lookup)
-    return out.drop(columns=["TimeBin"])
 
 
-def _correlations(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate aggregate baseline numeric correlations for EDA."""
-    variables = [v for v in NUMERIC_BASELINE_VARS if v in df]
-    rows: list[dict[str, object]] = []
-    for (flag, group), sub in df.groupby([EXPOSURE_COL, GROUP_COL], dropna=False):
-        corr = sub[variables].apply(pd.to_numeric, errors="coerce").corr(method="spearman")
-        for left in variables:
-            for right in variables:
-                rows.append(
-                    {
-                        "ExposureFlag": flag,
-                        "group": group,
-                        "variable_1": left,
-                        "variable_2": right,
-                        "spearman_rho": corr.loc[left, right],
-                    }
-                )
-    return pd.DataFrame(rows)
 
 
 def _table1(
@@ -1027,64 +939,8 @@ def _plot_age_distribution(df: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_followup_days(df: pd.DataFrame, path: Path) -> None:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    fig, ax = plt.subplots(figsize=(10.5, 6.2))
-    bins = np.arange(0, 391, 30)
-    for flag, sub in df.groupby(EXPOSURE_COL):
-        values = _numeric(sub["FollowUpDaysAvailable"]).dropna()
-        if values.empty:
-            continue
-        group = str(sub[GROUP_COL].iloc[0])
-        ax.hist(
-            values,
-            bins=bins,
-            density=True,
-            histtype="stepfilled",
-            alpha=0.30,
-            color=GROUP_COLOURS.get(int(flag), NEUTRAL_GREY),
-            label=f"{group}",
-        )
-        ax.hist(
-            values,
-            bins=bins,
-            density=True,
-            histtype="step",
-            linewidth=2.0,
-            color=GROUP_COLOURS.get(int(flag), NEUTRAL_GREY),
-        )
-    ax.axvline(365, linestyle="--", linewidth=1.5, color="#333333")
-    ax.text(365, ax.get_ylim()[1] * 0.93, " 365-day target", va="top", fontsize=9)
-    _style_axis(ax, title="Observed follow-up after the analytical index", xlabel="Follow-up days available", ylabel="Density")
-    ax.legend(frameon=False, title="Analysis group")
-    fig.tight_layout()
-    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
 
 
-def _plot_index_timeline(monthly: pd.DataFrame, path: Path) -> None:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    if monthly.empty:
-        return
-    temp = monthly.copy()
-    temp["IndexMonthDate"] = pd.to_datetime(temp["IndexMonth"], errors="coerce")
-    fig, ax = plt.subplots(figsize=(11.5, 6.2))
-    for flag, sub in temp.groupby(EXPOSURE_COL):
-        sub = sub.sort_values("IndexMonthDate")
-        group = str(sub[GROUP_COL].iloc[0])
-        ax.plot(
-            sub["IndexMonthDate"],
-            sub["pct_within_group"],
-            linewidth=2.2,
-            color=GROUP_COLOURS.get(int(flag), NEUTRAL_GREY),
-            label=group,
-        )
-    _style_axis(ax, title="Analytical index dates over calendar time", xlabel="Index month", ylabel="Share of group indices (%)")
-    ax.legend(frameon=False, title="Analysis group")
-    fig.autofmt_xdate()
-    fig.tight_layout()
-    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
 
 
 def _plot_utilisation_rates(utilisation: pd.DataFrame, figure_dir: Path) -> list[dict[str, str]]:
@@ -1142,185 +998,18 @@ def _plot_baseline_smd(balance: pd.DataFrame, path: Path, top_n: int = 20) -> No
     plt.close(fig)
 
 
-def _plot_relative_trajectory(relative: pd.DataFrame, figure_dir: Path) -> list[dict[str, str]]:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    manifest: list[dict[str, str]] = []
-    for outcome in OUTCOME_METRICS:
-        x = relative[relative["Outcome"].eq(outcome)].copy()
-        if x.empty:
-            continue
-        fig, ax = plt.subplots(figsize=(10.8, 6.2))
-        for flag, sub in x.groupby(EXPOSURE_COL):
-            sub = sub.sort_values("bin_mid_day")
-            group = str(sub["group"].iloc[0])
-            ax.plot(
-                sub["bin_mid_day"],
-                sub["rate_per_100_person_years"],
-                linewidth=2.2,
-                marker="o",
-                markersize=3.3,
-                color=GROUP_COLOURS.get(int(flag), NEUTRAL_GREY),
-                label=group,
-            )
-        ax.axvline(0, linestyle="--", linewidth=1.4, color="#333333")
-        ax.text(0, ax.get_ylim()[1] * 0.95, " analytical index", va="top", fontsize=9)
-        _style_axis(ax, title=f"{DISPLAY_LABELS.get(outcome, outcome)} around the analytical index", xlabel="Days relative to analytical index", ylabel="Events per 100 person-years")
-        ax.legend(frameon=False, title="Analysis group")
-        fig.tight_layout()
-        filename = f"relative_time_{_slug(outcome)}.png"
-        fig.savefig(figure_dir / filename, dpi=220, bbox_inches="tight", facecolor="white")
-        plt.close(fig)
-        manifest.append({"file": filename, "purpose": f"Crude {outcome} event-rate trajectory around the analytical index, adjusted for observed person-time."})
-    return manifest
 
 
-def _annotated_heatmap(matrix: pd.DataFrame, path: Path, title: str, label: str, *, vmin: float, vmax: float) -> None:
-    """Render an annotated aggregate heatmap for EDA output."""
-    if matrix.empty:
-        return
-    fig, ax = plt.subplots(figsize=(9.5, 7.5))
-    im = ax.imshow(matrix.values, vmin=vmin, vmax=vmax, cmap="RdBu_r" if vmin < 0 else "YlOrRd", aspect="auto")
-    ax.set_xticks(range(len(matrix.columns)))
-    ax.set_xticklabels([DISPLAY_LABELS.get(x, x) for x in matrix.columns], rotation=42, ha="right")
-    ax.set_yticks(range(len(matrix.index)))
-    ax.set_yticklabels([DISPLAY_LABELS.get(x, x) for x in matrix.index])
-    for i in range(matrix.shape[0]):
-        for j in range(matrix.shape[1]):
-            value = matrix.iloc[i, j]
-            if pd.notna(value):
-                # High-contrast label similar to a report-ready correlation matrix.
-                text_colour = "white" if abs(float(value)) >= (0.55 if vmin < 0 else 0.45) else "#222222"
-                ax.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=9, color=text_colour)
-    ax.set_title(title, fontsize=14, fontweight="bold", pad=14, loc="left")
-    ax.grid(False)
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-    cbar = fig.colorbar(im, ax=ax, shrink=0.85)
-    cbar.set_label(label)
-    fig.tight_layout()
-    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
 
 
-def _plot_correlation_heatmaps(correlations: pd.DataFrame, figure_dir: Path) -> list[dict[str, str]]:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    manifest: list[dict[str, str]] = []
-    if correlations.empty:
-        return manifest
-    for group, sub in correlations.groupby("group"):
-        matrix = sub.pivot(index="variable_1", columns="variable_2", values="spearman_rho")
-        filename = f"correlation_heatmap_{_slug(group)}.png"
-        _annotated_heatmap(matrix, figure_dir / filename, f"Baseline relationships — {group}", "Spearman rho", vmin=-1, vmax=1)
-        manifest.append({"file": filename, "purpose": f"Annotated baseline numeric-variable correlation matrix within {group}."})
-    return manifest
 
 
-def _cramers_v(x: pd.Series, y: pd.Series) -> float:
-    """Calculate Cramer's V effect size and chi-square p-value for categorical association."""
-    a = x.astype("string").fillna("<Missing>")
-    b = y.astype("string").fillna("<Missing>")
-    table = pd.crosstab(a, b)
-    if table.empty or table.shape[0] < 2 or table.shape[1] < 2:
-        return np.nan
-    obs = table.to_numpy(dtype=float)
-    n = obs.sum()
-    if n <= 0:
-        return np.nan
-    expected = np.outer(obs.sum(axis=1), obs.sum(axis=0)) / n
-    valid = expected > 0
-    chi2 = np.sum(((obs - expected) ** 2 / expected)[valid])
-    denom = min(obs.shape[0] - 1, obs.shape[1] - 1)
-    return float(np.sqrt((chi2 / n) / denom)) if denom > 0 else np.nan
 
 
-def _categorical_associations(df: pd.DataFrame) -> pd.DataFrame:
-    """Internal helper for categorical associations; see the surrounding module comments for the analytical rationale."""
-    variables = [v for v in ["Sex", "AgeBand", "EthnicityNationalCodeDesc", "PostcodeLAName", "IMDQuintile"] if v in df]
-    rows: list[dict[str, object]] = []
-    for (flag, group), sub in df.groupby([EXPOSURE_COL, GROUP_COL], dropna=False):
-        for v1 in variables:
-            for v2 in variables:
-                rows.append({
-                    "ExposureFlag": flag,
-                    "group": group,
-                    "variable_1": v1,
-                    "variable_2": v2,
-                    "cramers_v": 1.0 if v1 == v2 else _cramers_v(sub[v1], sub[v2]),
-                })
-    return pd.DataFrame(rows)
 
 
-def _plot_categorical_associations(associations: pd.DataFrame, figure_dir: Path) -> list[dict[str, str]]:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    manifest: list[dict[str, str]] = []
-    if associations.empty:
-        return manifest
-    for group, sub in associations.groupby("group"):
-        matrix = sub.pivot(index="variable_1", columns="variable_2", values="cramers_v")
-        filename = f"categorical_relationships_{_slug(group)}.png"
-        _annotated_heatmap(matrix, figure_dir / filename, f"Demographic relationships — {group}", "Cramér's V", vmin=0, vmax=1)
-        manifest.append({"file": filename, "purpose": f"Within-group categorical demographic association matrix (Cramér's V) for {group}."})
-    return manifest
 
 
-def _plot_source_coverage(source_coverage: pd.DataFrame, figure_dir: Path) -> list[dict[str, str]]:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    manifest: list[dict[str, str]] = []
-    if source_coverage.empty:
-        return manifest
-
-    required = {EXPOSURE_COL, "group", "source_presence_flag", "present_pct"}
-    if not required.issubset(source_coverage.columns):
-        return manifest
-
-    long = source_coverage.copy()
-    long["source"] = (
-        long["source_presence_flag"].astype(str)
-        .str.replace("Present", "", regex=False)
-        .str.replace("SportsLinkedMSK", "Sports-linked MSK", regex=False)
-        .str.replace("WiderMSK", "Wider MSK", regex=False)
-        .str.replace("SportsInpatient", "Sports inpatient", regex=False)
-        .str.replace("WiderInpatient", "Wider inpatient", regex=False)
-        .str.replace("SportsED", "Sports ED", regex=False)
-        .str.replace("WiderED", "Wider ED", regex=False)
-    )
-    sources = list(dict.fromkeys(long["source"]))
-    groups = list(dict.fromkeys(long["group"].astype(str)))
-
-    fig, ax = plt.subplots(figsize=(10.8, max(5.4, len(sources) * 0.52 + 2)))
-    y = np.arange(len(sources))
-    h = 0.34
-    for idx, group in enumerate(groups[:2]):
-        z = (
-            long[long["group"].astype(str).eq(group)]
-            .drop_duplicates("source")
-            .set_index("source")
-            .reindex(sources)
-        )
-        flag_values = pd.to_numeric(z[EXPOSURE_COL], errors="coerce").dropna()
-        flag = int(flag_values.iloc[0]) if not flag_values.empty else idx
-        vals = pd.to_numeric(z["present_pct"], errors="coerce").to_numpy(dtype=float)
-        bars = ax.barh(
-            y + (-h / 2 if idx == 0 else h / 2),
-            vals,
-            height=h,
-            color=GROUP_COLOURS.get(flag, NEUTRAL_GREY),
-            label=group,
-        )
-        for bar, val in zip(bars, vals):
-            if np.isfinite(val):
-                ax.text(val + 0.5, bar.get_y() + bar.get_height() / 2, f"{val:.1f}%", va="center", fontsize=9)
-    ax.set_yticks(y)
-    ax.set_yticklabels(sources)
-    _style_axis(ax, title="Cross-source healthcare record coverage", xlabel="Patients represented in source (%)")
-    ax.set_xlim(0, 105)
-    ax.legend(frameon=False, title="Analysis group")
-    fig.tight_layout()
-    filename = "source_coverage_by_group.png"
-    fig.savefig(figure_dir / filename, dpi=220, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    manifest.append({"file": filename, "purpose": "Structural coverage of MSK, inpatient and ED source families by analysis group."})
-    return manifest
 
 
 def _plot_pathway_timing(pathway: pd.DataFrame, figure_dir: Path) -> list[dict[str, str]]:
@@ -1329,8 +1018,8 @@ def _plot_pathway_timing(pathway: pd.DataFrame, figure_dir: Path) -> list[dict[s
     if pathway.empty:
         return manifest
     metric_labels = {
-        "ReferralToFirstMSKDays": "Referral to first MSK appointment (days)",
-        "FirstToLastMSKDays": "First to last MSK appointment (days)",
+        "ReferralToFirstMSKDays": "Time from MSK referral to FirstMSKDate",
+        "FirstToLastMSKDays": "Time from FirstMSKDate to LastMSKDate",
     }
     for metric, label in metric_labels.items():
         x = pathway[pathway["variable"].eq(metric)].copy()
@@ -1361,35 +1050,6 @@ def _plot_pathway_timing(pathway: pd.DataFrame, figure_dir: Path) -> list[dict[s
     return manifest
 
 
-def _plot_age_vs_baseline_utilisation(df: pd.DataFrame, path: Path, max_points_per_group: int = 4000) -> None:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    if "AgeAtIndex" not in df or "BaselineTotalHospitalCount" not in df:
-        return
-    fig, ax = plt.subplots(figsize=(10.5, 6.4))
-    rng = np.random.default_rng(42)
-    for flag, sub in df.groupby(EXPOSURE_COL):
-        x = sub[["AgeAtIndex", "BaselineTotalHospitalCount", GROUP_COL]].copy()
-        x["AgeAtIndex"] = _numeric(x["AgeAtIndex"])
-        x["BaselineTotalHospitalCount"] = _numeric(x["BaselineTotalHospitalCount"])
-        x = x.dropna()
-        if len(x) > max_points_per_group:
-            idx = rng.choice(x.index.to_numpy(), size=max_points_per_group, replace=False)
-            x = x.loc[idx]
-        jitter = rng.normal(0, 0.06, size=len(x))
-        ax.scatter(
-            x["AgeAtIndex"],
-            x["BaselineTotalHospitalCount"] + jitter,
-            s=18,
-            alpha=0.28,
-            color=GROUP_COLOURS.get(int(flag), NEUTRAL_GREY),
-            label=str(x[GROUP_COL].iloc[0]),
-            edgecolors="none",
-        )
-    _style_axis(ax, title="Age and baseline hospital utilisation", xlabel="Age at analytical index (years)", ylabel="Baseline total hospital events")
-    ax.legend(frameon=False, title="Analysis group")
-    fig.tight_layout()
-    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
 
 def _write_manifest(table_dir: Path, figure_manifest: list[dict[str, str]], tables: dict[str, pd.DataFrame]) -> None:
     """Write a descriptive-output manifest for reproducible review."""
@@ -1401,7 +1061,8 @@ def _write_manifest(table_dir: Path, figure_manifest: list[dict[str, str]], tabl
         "baseline_balance_smd": "Unadjusted standardised mean differences before propensity adjustment.",
         "missingness_summary": "Literal and effective information missingness by group.",
         "source_coverage_summary": "Cross-source patient presence/coverage by analysis group.",
-        "pathway_timing_summary": "Referral-to-first-MSK and first-to-last-MSK interval distributions.",
+        "followup_observation_summary": "Observed follow-up completeness and duration by analysis group.",
+        "pathway_timing_summary": "Source-defined referral-to-FirstMSKDate and FirstMSKDate-to-LastMSKDate interval distributions.",
         "pathway_timing_qa": "Temporal interval QA including negative/zero intervals.",
         "utilisation_summary": "Baseline/follow-up event burden, zero inflation, dispersion and crude rates.",
         "prepost_change_summary": "Within-group crude baseline-to-follow-up utilisation changes.",
@@ -1409,9 +1070,6 @@ def _write_manifest(table_dir: Path, figure_manifest: list[dict[str, str]], tabl
         "index_monthly_summary": "Monthly analytical-index distribution by group.",
         "event_structure_summary": "Event-ledger structure by group, source, event type and analysis period.",
         "event_calendar_month_summary": "Calendar-month event counts among eligible patients.",
-        "relative_time_rate_summary": "Person-time adjusted event trajectories around the analytical index.",
-        "baseline_spearman_correlations": "Within-group baseline numeric relationships.",
-        "baseline_categorical_associations": "Within-group categorical demographic relationships using Cramér's V.",
         "eda_diagnostics": "High-level diagnostics that inform comparative-model design and stakeholder review.",
     }
     pd.DataFrame(
@@ -1432,13 +1090,20 @@ def run_descriptive(
     table_dir.mkdir(parents=True, exist_ok=True)
     figure_dir.mkdir(parents=True, exist_ok=True)
 
+    # Stage 07 owns these folders. Clear prior Stage 07 artefacts so removed
+    # figures/tables cannot remain on disk and be mistaken for current outputs.
+    for stale in figure_dir.glob("*.png"):
+        stale.unlink()
+    for stale in table_dir.glob("*.csv"):
+        stale.unlink()
+
     stage_header(
         "07",
         "DESCRIPTIVE / EXPLORATORY ANALYSIS",
         purpose=(
-            "Describe the real analytical population before propensity adjustment: cohort composition, "
-            "baseline characteristics, missingness, source coverage, pathway timing, follow-up availability, "
-            "crude hospital-utilisation rates, pre/post change and unadjusted baseline imbalance."
+            "Describe the analytical population before propensity adjustment: cohort composition, "
+            "baseline characteristics, missingness, source coverage, pathway timing, follow-up completeness, "
+            "crude hospital-utilisation rates, baseline/follow-up change and unadjusted baseline imbalance."
         ),
         inputs=[analysis_dir / "patient_outcomes.csv", analysis_dir / "healthcare_event_ledger.csv"],
         outputs=[table_dir, figure_dir],
@@ -1479,14 +1144,14 @@ def run_descriptive(
     balance = _baseline_balance(eligible, NUMERIC_BASELINE_VARS, CATEGORICAL_BASELINE_VARS)
     missingness = _missingness_summary(eligible)
     source_coverage = _source_coverage(eligible)
+    followup_observation = _followup_observation_summary(eligible)
     pathway_timing, pathway_timing_qa = _pathway_timing(eligible)
     utilisation = _utilisation_summary(eligible)
     prepost = _prepost_change(utilisation)
+    # Calendar-time summaries are retained as QA tables because index-year
+    # comparability matters for the propensity design; no index-timeline plot is produced.
     annual_index, monthly_index = _index_temporal_summary(eligible)
     event_structure, event_monthly = _event_structure(ledger, eligible)
-    relative = _relative_time_rates(ledger, eligible, bin_days=30)
-    correlations = _correlations(eligible)
-    categorical_associations = _categorical_associations(eligible)
     group_names = _group_lookup(eligible)
     table1 = _table1(numeric, categorical, balance, group_names)
     diagnostics = _eda_diagnostics(eligible, balance, utilisation, missingness)
@@ -1499,6 +1164,7 @@ def run_descriptive(
         "baseline_balance_smd": balance,
         "missingness_summary": missingness,
         "source_coverage_summary": source_coverage,
+        "followup_observation_summary": followup_observation,
         "pathway_timing_summary": pathway_timing,
         "pathway_timing_qa": pathway_timing_qa,
         "utilisation_summary": utilisation,
@@ -1507,9 +1173,6 @@ def run_descriptive(
         "index_monthly_summary": monthly_index,
         "event_structure_summary": event_structure,
         "event_calendar_month_summary": event_monthly,
-        "relative_time_rate_summary": relative,
-        "baseline_spearman_correlations": correlations,
-        "baseline_categorical_associations": categorical_associations,
         "eda_diagnostics": diagnostics,
     }
 
@@ -1584,7 +1247,6 @@ def run_descriptive(
     figure_manifest.append({"file": "age_distribution.png", "purpose": "Age distribution at the analytical index by analysis group."})
 
     demographic_plots = [
-        ("AgeBand", "age_band_distribution.png", "Age profile by analysis group", None),
         ("Sex", "sex_distribution.png", "Sex distribution by analysis group", None),
         ("EthnicityNationalCodeDesc", "ethnicity_distribution.png", "Recorded ethnicity profile by analysis group", 10),
         ("IMDQuintile", "imd_quintile_distribution.png", "Deprivation profile by analysis group", None),
@@ -1598,25 +1260,12 @@ def run_descriptive(
             )
             figure_manifest.append({"file": filename, "purpose": f"{DISPLAY_LABELS.get(variable, variable)} distribution by analysis group."})
 
-    _plot_followup_days(eligible, figure_dir / "followup_days_distribution.png")
-    figure_manifest.append({"file": "followup_days_distribution.png", "purpose": "Distribution of observed follow-up days by analysis group."})
-
-    _plot_index_timeline(monthly_index, figure_dir / "index_timeline.png")
-    figure_manifest.append({"file": "index_timeline.png", "purpose": "Calendar-time distribution of analytical index dates by group."})
-
     figure_manifest.extend(_plot_utilisation_rates(utilisation, figure_dir))
 
     _plot_baseline_smd(balance, figure_dir / "baseline_smd_top20.png")
     figure_manifest.append({"file": "baseline_smd_top20.png", "purpose": "Largest unadjusted baseline SMDs before propensity adjustment."})
 
-    figure_manifest.extend(_plot_relative_trajectory(relative, figure_dir))
-    figure_manifest.extend(_plot_correlation_heatmaps(correlations, figure_dir))
-    figure_manifest.extend(_plot_categorical_associations(categorical_associations, figure_dir))
-    figure_manifest.extend(_plot_source_coverage(source_coverage, figure_dir))
     figure_manifest.extend(_plot_pathway_timing(pathway_timing, figure_dir))
-
-    _plot_age_vs_baseline_utilisation(eligible, figure_dir / "age_vs_baseline_hospital_utilisation.png")
-    figure_manifest.append({"file": "age_vs_baseline_hospital_utilisation.png", "purpose": "Patient-level relationship between age and baseline total hospital utilisation by analysis group (display sample only)."})
 
     _write_manifest(table_dir, figure_manifest, outputs)
 
@@ -1704,6 +1353,7 @@ def run_descriptive(
             table_dir / "descriptive_key_findings.csv",
             table_dir / "table1_baseline_characteristics.csv",
             table_dir / "missingness_summary.csv",
+            table_dir / "followup_observation_summary.csv",
             table_dir / "baseline_balance_smd.csv",
             table_dir / "utilisation_summary.csv",
             table_dir / "prepost_change_summary.csv",
