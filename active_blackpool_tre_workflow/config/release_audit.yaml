@@ -1,0 +1,27 @@
+# =============================================================================
+# TRE release-output PRE-SCREEN configuration
+# =============================================================================
+# This file does NOT define formal disclosure approval.  It only helps the
+# analyst locate outputs that are clearly patient-level/internal or that may
+# contain small aggregate cells requiring formal local TRE review.
+
+release_audit:
+  # Generic internal warning threshold.  Replace only if local disclosure policy
+  # requires a different pre-screen value; final approval remains with the TRE.
+  minimum_cell_count: 5
+
+  # Only analytical output folders are scanned. Raw/cleaned/processed patient
+  # data should never be treated as release candidates in the first place.
+  scan_directories:
+    - outputs/descriptive
+    - outputs/comparative
+    - outputs/clustering/tables
+
+  # Filename heuristics for artefacts known or likely to be patient-grain.
+  # These are automatically flagged as internal-only candidates for review.
+  patient_level_filename_patterns:
+    - "*patient*"
+    - "*assignments*"
+    - "*matched_population*"
+    - "*propensity_scored_population*"
+    - "*ledger*"

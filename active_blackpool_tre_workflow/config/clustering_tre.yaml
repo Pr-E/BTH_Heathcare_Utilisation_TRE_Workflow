@@ -1,0 +1,37 @@
+# =============================================================================
+# Exploratory baseline healthcare-utilisation clustering
+# =============================================================================
+clustering:
+  # Cluster construction uses baseline utilisation only.
+  baseline_features:
+    - BaselineEDRatePerPY
+    - BaselineInpatientRatePerPY
+    - BaselineEmergencyInpatientRatePerPY
+
+  # Always recompute K=2..6 diagnostics on real TRE data.
+  candidate_k: [2, 3, 4, 5, 6]
+
+  # Prespecified report-facing report-facing candidate. It is retained only if the
+  # real data meet size/stability requirements; synthetic centroids are not reused.
+  selection_mode: prespecified_with_diagnostics
+  prespecified_k: 4
+  fail_if_prespecified_inadequate: true
+
+  winsor_upper_quantile: 0.995
+  n_init: 50
+  max_iter: 500
+  random_seed: 42
+  silhouette_sample_size: 2000
+  stability_sample_size: 8000
+  stability_seeds: [11, 23, 37, 51, 71]
+  minimum_cluster_n: 50
+  minimum_cluster_pct: 1.0
+  minimum_stability_ari: 0.80
+
+  # Sensitivity to the fact that emergency admissions are nested within total inpatient admissions.
+  run_mutually_exclusive_inpatient_sensitivity: true
+
+  # Trajectory tables are still produced for all clusters, but the terminal log
+  # flags any phenotype with fewer Sports-linked patients than this threshold.
+  # This is a descriptive stability warning, not a hard exclusion rule.
+  minimum_sports_linked_for_trajectory_interpretation: 30
