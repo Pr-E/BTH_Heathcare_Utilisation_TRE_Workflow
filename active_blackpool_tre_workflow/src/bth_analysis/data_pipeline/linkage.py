@@ -164,7 +164,12 @@ def run_linkage(
             "Sports-linked and Wider MSK pathway definitions explicit."
         ),
         inputs=[processed_dir],
-        outputs=[analysis_dir / "patient_spine.csv", qa_dir / "04_linkage_overlap_qa.csv"],
+        outputs=[
+            analysis_dir / "patient_spine.csv",
+            qa_dir / "04_linkage_overlap_qa.csv",
+            qa_dir / "04_group_source_coverage.csv",
+            qa_dir / "04_demographic_source_qa.csv",
+        ],
     )
 
     wider_ref = _read(processed_dir, "msk_wider_referrals")
@@ -226,6 +231,7 @@ def run_linkage(
             "AnchorFirstMSKReferralDate": "WiderAnchorFirstMSKReferralDate",
             "AnchorFirstMSKDate": "WiderAnchorFirstMSKDate",
             "AnchorLastMSKDate": "WiderAnchorLastMSKDate",
+            "MSKReferencePatientFlag": "WiderMSKReferencePatientFlag",
         }
     )
     sports_anchor = sports_anchor.rename(
@@ -234,6 +240,7 @@ def run_linkage(
             "AnchorFirstMSKReferralDate": "SportsAnchorFirstMSKReferralDate",
             "AnchorFirstMSKDate": "SportsAnchorFirstMSKDate",
             "AnchorLastMSKDate": "SportsAnchorLastMSKDate",
+            "MSKReferencePatientFlag": "SportsMSKReferencePatientFlag",
         }
     )
 
@@ -255,6 +262,25 @@ def run_linkage(
         spine["WiderMSKFlag"].eq(1)
         & spine["SportsLinkedBTHFlag"].eq(0)
     ).astype("Int64")
+
+    # Source-specific anchor markers should agree with MSK source-presence flags.
+    # The explicit names preserve lineage and avoid ambiguous merge suffixes.
+    for marker_col, presence_col in [
+        ("WiderMSKReferencePatientFlag", "PresentWiderMSK"),
+        ("SportsMSKReferencePatientFlag", "PresentSportsLinkedMSK"),
+    ]:
+        if marker_col in spine.columns:
+            marker_value = pd.to_numeric(
+                spine[marker_col], errors="coerce"
+            ).fillna(0).astype("Int64")
+            presence_value = spine[presence_col].fillna(0).astype("Int64")
+            agreement = marker_value.eq(presence_value)
+            if not agreement.all():
+                mismatch_n = int((~agreement).sum())
+                raise ValueError(
+                    f"{marker_col} disagrees with {presence_col} "
+                    f"for {mismatch_n:,} patients."
+                )
 
     spine["WorkingCohortLabel"] = np.select(
         [
