@@ -119,7 +119,7 @@ Clusters are formed using baseline:
 
 Demographics, pathway group and follow-up outcomes are used only afterwards to describe the clusters.
 
-K=4 is prespecified for reporting, but K=2–6 diagnostics are recalculated on the real data and K=4 must still meet the configured size and stability requirements.
+K=4 is the preferred reporting metric, while K=2–6 are reassessed on the real data to confirm that K=4 remains sufficiently stable, well separated and appropriately sized.
 
 ### Disclosure control
 
