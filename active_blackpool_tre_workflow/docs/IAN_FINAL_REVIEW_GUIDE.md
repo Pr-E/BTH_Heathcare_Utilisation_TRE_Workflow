@@ -7,9 +7,8 @@ This package is the final **real-data translation workflow** intended for review
 The review should answer four questions:
 
 1. Are the six real BTH source files and identifier semantics represented correctly?
-2. Is the current pathway-group/index interpretation acceptable for the initial real-data comparison?
-3. Are the cohort, propensity, comparative and clustering specifications methodologically appropriate?
-4. Are the logs and audit outputs sufficient for another analyst to understand exactly what happened at every stage without relying on undocumented notebook state?
+2. Are the cohort, propensity, comparative and clustering specifications methodologically appropriate?
+3. Are the logs and audit outputs sufficient for another analyst to understand exactly what happened at every stage without relying on undocumented notebook state?
 
 ---
 
