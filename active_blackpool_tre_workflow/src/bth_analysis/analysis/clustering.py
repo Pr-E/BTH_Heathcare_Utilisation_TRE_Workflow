@@ -1,13 +1,14 @@
-"""Exploratory baseline healthcare-utilisation phenotyping for TRE data.
+"""Exploratory baseline healthcare-utilisation phenotyping.
 
-Clusters are formed from pre-index utilisation only.  Pathway membership,
+Clusters are formed from pre-index utilisation only. Pathway membership,
 demographics and follow-up outcomes are deliberately excluded from K-means
 construction and are used only afterwards for descriptive profiling.
 
-Candidate K values are evaluated from the observed data using separation, cluster
-size and stability diagnostics. A prespecified report-facing K is retained only
-when it satisfies the configured adequacy criteria; otherwise the workflow blocks
-or uses the automatic diagnostic solution according to configuration.
+Candidate cluster solutions are evaluated using separation, minimum-size and
+stability diagnostics. A prespecified K=4 is retained only when it satisfies
+the configured criteria; otherwise the workflow follows the configured
+selection/failure rule. Cluster centroids are estimated from the data supplied
+to the current run.
 """
 from __future__ import annotations
 
@@ -340,6 +341,73 @@ def _cluster_characterisation(baseline_profiles: pd.DataFrame, features: list[st
         })
     return pd.DataFrame(rows).sort_values("UtilisationCluster")
 
+def _phenotype_guide(
+    baseline_profiles: pd.DataFrame,
+    characterisation: pd.DataFrame,
+) -> pd.DataFrame:
+    """Create concise, data-derived phenotype labels and a reviewer-facing guide.
+
+    Cluster numbers are arbitrary categorical identifiers. This helper converts
+    them into descriptive labels derived only from the baseline utilisation
+    profile. The highest-intensity non-zero cluster is explicitly identified
+    relative to the other selected-K phenotypes; labels remain provisional until
+    clinical/source review.
+    """
+    guide = characterisation.merge(
+        baseline_profiles,
+        on=["UtilisationCluster", "patients", "pct_of_analysis_population"],
+        how="left",
+    ).copy()
+
+    short_service = {
+        "ED attendances": "ED",
+        "Inpatient admissions": "Inpatient",
+        "Emergency inpatient admissions": "Emergency inpatient",
+    }
+
+    intensity = pd.to_numeric(
+        guide["mean_sum_of_input_rates_per_py"], errors="coerce"
+    )
+    positive = intensity.fillna(0).gt(0)
+    highest_cluster = None
+    if positive.any():
+        highest_cluster = int(
+            guide.loc[positive]
+            .sort_values("mean_sum_of_input_rates_per_py")
+            .iloc[-1]["UtilisationCluster"]
+        )
+
+    labels = []
+    axis_labels = []
+    for _, row in guide.iterrows():
+        cluster = int(row["UtilisationCluster"])
+        dominant = str(row.get("dominant_baseline_service", "Not available"))
+
+        if dominant == "None":
+            label = "No recorded baseline hospital use"
+        elif dominant in short_service:
+            base = f"{short_service[dominant]}-dominant"
+            if highest_cluster is not None and cluster == highest_cluster:
+                label = f"Highest-intensity {base.lower()}"
+            else:
+                label = base
+        else:
+            label = "Baseline utilisation phenotype"
+
+        labels.append(label)
+        axis_labels.append(f"C{cluster}: {label}")
+
+    guide["phenotype_label"] = labels
+    guide["phenotype_axis_label"] = axis_labels
+    guide["phenotype_short_label"] = (
+        guide["phenotype_label"]
+        .str.replace("No recorded baseline hospital use", "No baseline hospital use", regex=False)
+        .str.replace("Highest-intensity inpatient-dominant", "High-intensity inpatient", regex=False)
+        .str.replace("Highest-intensity emergency inpatient-dominant", "High-intensity emergency inpatient", regex=False)
+    )
+    return guide.sort_values("UtilisationCluster")
+
+
 def _centroid_table(
     model: KMeans,
     cluster_mapping: pd.DataFrame,
@@ -421,6 +489,157 @@ def _categorical_profiles(df: pd.DataFrame) -> pd.DataFrame:
         ]])
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
+
+
+def _top_category(series: pd.Series) -> tuple[str, float]:
+    """Return the most common non-missing category and its within-cluster percentage."""
+    x = series.astype("string").fillna("<Missing>")
+    if x.empty:
+        return "Not available", np.nan
+    counts = x.value_counts(dropna=False)
+    if counts.empty:
+        return "Not available", np.nan
+    level = str(counts.index[0])
+    pct = float(counts.iloc[0] / len(x) * 100)
+    return level, pct
+
+
+def _aggregate_rate_per_100py(
+    df: pd.DataFrame,
+    count_col: str,
+    py_col: str,
+) -> float:
+    """Calculate one aggregate event rate per 100 person-years."""
+    if count_col not in df.columns or py_col not in df.columns:
+        return np.nan
+    events = float(_clean_numeric(df[count_col]).fillna(0).sum())
+    person_years = float(_clean_numeric(df[py_col]).fillna(0).sum())
+    return events / person_years * 100 if person_years > 0 else np.nan
+
+
+def _cluster_patient_profiles(
+    df: pd.DataFrame,
+    phenotype_guide: pd.DataFrame,
+    exposure_dist: pd.DataFrame,
+) -> pd.DataFrame:
+    """Create one concise reviewer-facing patient/profile row per phenotype.
+
+    Demographics, pathway membership and follow-up outcomes are profiled only
+    after cluster assignment; none of these variables enters K-means fitting.
+    """
+    guide = phenotype_guide.set_index("UtilisationCluster")
+    exposure = exposure_dist.set_index("UtilisationCluster")
+    rows: list[dict[str, Any]] = []
+
+    def _rate_distribution(sub: pd.DataFrame, rate_col: str, prefix: str, row: dict[str, Any]) -> None:
+        if rate_col not in sub.columns:
+            return
+        x = _clean_numeric(sub[rate_col]).dropna() * 100.0
+        if not x.empty:
+            row[f"{prefix}_mean_rate_per_100py"] = float(x.mean())
+            row[f"{prefix}_median_rate_per_100py"] = float(x.median())
+
+    for cluster, sub in df.groupby("UtilisationCluster", sort=True):
+        cluster = int(cluster)
+        row: dict[str, Any] = {
+            "UtilisationCluster": cluster,
+            "phenotype_label": (
+                str(guide.loc[cluster, "phenotype_label"])
+                if cluster in guide.index else f"Cluster {cluster}"
+            ),
+            "n": int(len(sub)),
+            "pct": float(len(sub) / len(df) * 100),
+        }
+
+        if "AgeAtIndex" in sub.columns:
+            age = _clean_numeric(sub["AgeAtIndex"]).dropna()
+            if not age.empty:
+                row.update({
+                    "age_median": float(age.median()),
+                    "age_q1": float(age.quantile(0.25)),
+                    "age_q3": float(age.quantile(0.75)),
+                })
+
+        if "Sex" in sub.columns:
+            sex = sub["Sex"].astype("string").str.strip().str.lower()
+            valid_sex = sex[sex.notna() & ~sex.isin(["", "<missing>", "unknown", "not known"])]
+            if not valid_sex.empty:
+                female_tokens = {"female", "f", "woman", "women"}
+                row["female_pct"] = float(valid_sex.isin(female_tokens).mean() * 100)
+            level, pct = _top_category(sub["Sex"])
+            row["dominant_sex"] = level
+            row["dominant_sex_pct"] = pct
+
+        if "EthnicityNationalCodeDesc" in sub.columns:
+            level, pct = _top_category(sub["EthnicityNationalCodeDesc"])
+            row["dominant_ethnicity"] = level
+            row["dominant_ethnicity_pct"] = pct
+
+        if "Index_of_Multiple_Deprivation_IMD_Decile" in sub.columns:
+            imd = _clean_numeric(sub["Index_of_Multiple_Deprivation_IMD_Decile"]).dropna()
+            if not imd.empty:
+                row.update({
+                    "imd_decile_median": float(imd.median()),
+                    "imd_decile_q1": float(imd.quantile(0.25)),
+                    "imd_decile_q3": float(imd.quantile(0.75)),
+                })
+
+        if "PostcodeLAName" in sub.columns:
+            level, pct = _top_category(sub["PostcodeLAName"])
+            row["main_geography"] = level
+            row["main_geography_pct"] = pct
+
+        if cluster in exposure.index:
+            row["sports_linked_n"] = int(exposure.loc[cluster, "sports_linked_n"])
+            row["sports_linked_pct"] = float(exposure.loc[cluster, "sports_linked_pct_within_cluster"])
+            row["wider_msk_n"] = int(exposure.loc[cluster, "wider_msk_n"])
+            row["wider_msk_pct"] = float(100.0 - row["sports_linked_pct"])
+
+        # Patient-level baseline/follow-up rate distributions (events per 100 PY).
+        for prefix, rate_col in [
+            ("baseline_ed", "BaselineEDRatePerPY"),
+            ("baseline_inpatient", "BaselineInpatientRatePerPY"),
+            ("baseline_emergency_inpatient", "BaselineEmergencyInpatientRatePerPY"),
+            ("followup_ed", "FollowUpEDRatePerPY"),
+            ("followup_inpatient", "FollowUpInpatientRatePerPY"),
+            ("followup_emergency_inpatient", "FollowUpEmergencyInpatientRatePerPY"),
+            ("followup_total_hospital", "FollowUpTotalHospitalRatePerPY"),
+        ]:
+            _rate_distribution(sub, rate_col, prefix, row)
+
+        # Aggregate crude cluster rates preserve the correct event/person-time denominator.
+        for outcome, baseline_count, followup_count in [
+            ("ed", "BaselineEDCount", "FollowUpEDCount"),
+            ("inpatient", "BaselineInpatientCount", "FollowUpInpatientCount"),
+            ("emergency_inpatient", "BaselineEmergencyInpatientCount", "FollowUpEmergencyInpatientCount"),
+            ("total_hospital", "BaselineTotalHospitalCount", "FollowUpTotalHospitalCount"),
+        ]:
+            if baseline_count in sub.columns:
+                row[f"baseline_{outcome}_aggregate_rate_per_100py"] = _aggregate_rate_per_100py(
+                    sub, baseline_count, "BaselinePersonYears"
+                )
+            elif outcome == "total_hospital" and {"BaselineEDCount", "BaselineInpatientCount"}.issubset(sub.columns):
+                events = (_clean_numeric(sub["BaselineEDCount"]).fillna(0) +
+                          _clean_numeric(sub["BaselineInpatientCount"]).fillna(0)).sum()
+                py = _clean_numeric(sub["BaselinePersonYears"]).fillna(0).sum()
+                row[f"baseline_{outcome}_aggregate_rate_per_100py"] = float(events / py * 100) if py > 0 else np.nan
+
+            if followup_count in sub.columns:
+                row[f"followup_{outcome}_aggregate_rate_per_100py"] = _aggregate_rate_per_100py(
+                    sub, followup_count, "FollowUpPersonYears"
+                )
+            elif outcome == "total_hospital" and {"FollowUpEDCount", "FollowUpInpatientCount"}.issubset(sub.columns):
+                events = (_clean_numeric(sub["FollowUpEDCount"]).fillna(0) +
+                          _clean_numeric(sub["FollowUpInpatientCount"]).fillna(0)).sum()
+                py = _clean_numeric(sub["FollowUpPersonYears"]).fillna(0).sum()
+                row[f"followup_{outcome}_aggregate_rate_per_100py"] = float(events / py * 100) if py > 0 else np.nan
+
+        if "FullFollowUpFlag" in sub.columns:
+            row["full_followup_pct"] = float(_clean_numeric(sub["FullFollowUpFlag"]).eq(1).mean() * 100)
+
+        rows.append(row)
+
+    return pd.DataFrame(rows).sort_values("UtilisationCluster")
 
 def _exposure_distribution(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Compare pathway-group composition across clusters and calculate descriptive association."""
@@ -543,7 +762,7 @@ def _followup_profiles(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _plot_cluster_selection(metrics: pd.DataFrame, selected_k: int, path: Path) -> None:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
+    """Plot silhouette score across candidate K solutions and highlight selected K."""
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
     ax.plot(metrics["k"], metrics["silhouette_score"], marker="o")
     chosen = metrics.loc[metrics["k"].eq(selected_k)].iloc[0]
@@ -551,96 +770,167 @@ def _plot_cluster_selection(metrics: pd.DataFrame, selected_k: int, path: Path) 
     ax.set_title("K-means cluster selection: silhouette score", loc="left", fontweight="bold")
     ax.set_xlabel("Number of clusters (K)")
     ax.set_ylabel("Silhouette score")
+    ax.set_xticks(metrics["k"].astype(int).tolist())
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    fig.savefig(path, dpi=220, bbox_inches="tight")
+    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
+def _plot_cluster_sizes(phenotype_guide: pd.DataFrame, path: Path) -> None:
+    """Plot the share of the eligible population in each baseline utilisation phenotype."""
+    x = phenotype_guide.sort_values("UtilisationCluster").copy()
+    labels = x["phenotype_axis_label"].astype(str).tolist()
+    values = x["pct_of_analysis_population"].astype(float).to_numpy()
 
-def _plot_cluster_sizes(exposure_dist: pd.DataFrame, path: Path) -> None:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    fig, ax = plt.subplots(figsize=(8.5, 5.5))
-    x = exposure_dist["UtilisationCluster"].astype(str)
-    y = exposure_dist["pct_of_analysis_population"]
-    bars = ax.bar(x, y)
-    for bar, value in zip(bars, y):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f"{value:.1f}%", ha="center", va="bottom")
-    ax.set_title("Baseline healthcare-utilisation phenotype prevalence", loc="left", fontweight="bold")
-    ax.set_xlabel("Utilisation cluster")
-    ax.set_ylabel("Share of eligible population (%)")
+    fig, ax = plt.subplots(figsize=(10.2, 6.0))
+    y = np.arange(len(x))
+    bars = ax.barh(y, values)
+    for bar, value in zip(bars, values):
+        ax.text(
+            value + max(values.max() * 0.012, 0.25),
+            bar.get_y() + bar.get_height() / 2,
+            f"{value:.1f}%",
+            va="center",
+            fontsize=10,
+        )
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_title("Distribution of baseline healthcare-utilisation phenotypes", loc="left", fontweight="bold")
+    ax.set_xlabel("Share of eligible population (%)")
+    ax.set_ylabel("")
+    ax.set_xlim(left=0)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    fig.savefig(path, dpi=220, bbox_inches="tight")
+    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
-
-def _plot_centroid_heatmap(centroids: pd.DataFrame, features: list[str], path: Path) -> None:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
+def _plot_centroid_heatmap(
+    centroids: pd.DataFrame,
+    features: list[str],
+    phenotype_guide: pd.DataFrame,
+    path: Path,
+) -> None:
+    """Plot standardised baseline utilisation signatures using descriptive phenotype labels."""
     data = centroids.set_index("UtilisationCluster")[features]
-    fig, ax = plt.subplots(figsize=(9.5, max(4.8, 1.0 + 0.75 * len(data))))
+    guide = phenotype_guide.set_index("UtilisationCluster")
+    service_labels = {
+        "BaselineEDRatePerPY": "ED",
+        "BaselineInpatientRatePerPY": "Inpatient",
+        "BaselineEmergencyInpatientRatePerPY": "Emergency inpatient",
+    }
+
+    fig, ax = plt.subplots(figsize=(10.2, max(5.0, 1.0 + 0.9 * len(data))))
     image = ax.imshow(data.to_numpy(dtype=float), aspect="auto")
     ax.set_xticks(np.arange(len(features)))
-    ax.set_xticklabels([f.replace("Baseline", "").replace("RatePerPY", "") for f in features], rotation=25, ha="right")
+    ax.set_xticklabels([service_labels.get(f, f) for f in features])
     ax.set_yticks(np.arange(len(data)))
-    ax.set_yticklabels([f"Cluster {i}" for i in data.index])
-    ax.set_title("Standardised baseline utilisation profiles", loc="left", fontweight="bold")
+    ax.set_yticklabels([
+        f"C{i}: {guide.loc[i, 'phenotype_label']}" if i in guide.index else f"Cluster {i}"
+        for i in data.index
+    ])
+    ax.set_title("Baseline utilisation signature of each phenotype", loc="left", fontweight="bold")
     for i in range(data.shape[0]):
         for j in range(data.shape[1]):
-            value = float(data.iloc[i, j])
-            ax.text(j, i, f"{value:.2f}", ha="center", va="center")
+            ax.text(j, i, f"{float(data.iloc[i, j]):.2f}", ha="center", va="center")
     cbar = fig.colorbar(image, ax=ax)
-    cbar.set_label("Standardised centroid (z-score)")
+    cbar.set_label("Standardised centroid (z-score; 0 = cohort average)")
     fig.tight_layout()
-    fig.savefig(path, dpi=220, bbox_inches="tight")
+    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
+def _plot_baseline_profile_rates(
+    baseline_profiles: pd.DataFrame,
+    phenotype_guide: pd.DataFrame,
+    path: Path,
+) -> None:
+    """Show the raw baseline rates that define each healthcare-utilisation phenotype."""
+    profile = baseline_profiles.sort_values("UtilisationCluster").copy()
+    guide = phenotype_guide.set_index("UtilisationCluster")
+    specs = [
+        ("BaselineEDRatePerPY__mean", "ED attendances"),
+        ("BaselineInpatientRatePerPY__mean", "Inpatient admissions"),
+        ("BaselineEmergencyInpatientRatePerPY__mean", "Emergency inpatient admissions"),
+    ]
 
-def _plot_group_cluster_distribution(exposure_dist: pd.DataFrame, path: Path) -> None:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
-    long_rows = []
-    for _, row in exposure_dist.iterrows():
-        long_rows.append({
-            "cluster": int(row["UtilisationCluster"]),
-            "group": "Sports-linked BTH pathway",
-            "pct": float(row["pct_of_all_sports_linked_in_cluster"]),
-        })
-        long_rows.append({
-            "cluster": int(row["UtilisationCluster"]),
-            "group": "Wider MSK comparison",
-            "pct": float(row["pct_of_all_wider_msk_in_cluster"]),
-        })
-    long = pd.DataFrame(long_rows)
+    y = np.arange(len(profile), dtype=float)
+    height = 0.23
+    offsets = [-height, 0.0, height]
+    fig, ax = plt.subplots(figsize=(11.2, 6.5))
 
-    groups = long["group"].unique().tolist()
-    clusters = sorted(long["cluster"].unique())
-    x = np.arange(len(clusters), dtype=float)
-    width = 0.38
+    for offset, (column, label) in zip(offsets, specs):
+        if column not in profile.columns:
+            continue
+        values = pd.to_numeric(profile[column], errors="coerce").to_numpy() * 100
+        bars = ax.barh(y + offset, values, height=height, label=label)
+        for bar, value in zip(bars, values):
+            if np.isfinite(value) and value > 0:
+                ax.text(value, bar.get_y() + bar.get_height() / 2, f" {value:.1f}", va="center", fontsize=9)
 
-    fig, ax = plt.subplots(figsize=(9.5, 5.8))
-    for idx, group in enumerate(groups):
-        vals = [
-            float(long.loc[(long["group"].eq(group)) & (long["cluster"].eq(c)), "pct"].iloc[0])
-            for c in clusters
-        ]
-        offset = (idx - (len(groups)-1)/2) * width
-        bars = ax.bar(x + offset, vals, width=width, label=group)
-        for bar, value in zip(bars, vals):
-            if value >= 1.0:
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f"{value:.1f}%", ha="center", va="bottom", fontsize=9)
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"Cluster {c}" for c in clusters])
-    ax.set_title("Where each analysis group falls across baseline utilisation phenotypes", loc="left", fontweight="bold")
-    ax.set_ylabel("Share of each analysis group (%)")
-    ax.set_xlabel("")
+    labels = [
+        f"C{int(c)}: {guide.loc[int(c), 'phenotype_label']}"
+        for c in profile["UtilisationCluster"]
+    ]
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_title("What each baseline utilisation phenotype represents", loc="left", fontweight="bold")
+    ax.set_xlabel("Mean baseline events per 100 person-years")
+    ax.set_ylabel("")
     ax.legend(frameon=False)
+    ax.set_xlim(left=0)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    fig.savefig(path, dpi=220, bbox_inches="tight")
+    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
+def _plot_group_cluster_distribution(
+    exposure_dist: pd.DataFrame,
+    phenotype_guide: pd.DataFrame,
+    path: Path,
+) -> None:
+    """Compare where Sports-linked and Wider MSK patients fall across phenotypes."""
+    x = exposure_dist.sort_values("UtilisationCluster").copy()
+    guide = phenotype_guide.set_index("UtilisationCluster")
+    y = np.arange(len(x), dtype=float)
+    height = 0.34
 
-def _plot_followup_by_cluster(trajectory: pd.DataFrame, outcome_key: str, path: Path) -> None:
-    """Create and save the corresponding aggregate diagnostic/reporting figure."""
+    sports = x["pct_of_all_sports_linked_in_cluster"].astype(float).to_numpy()
+    wider = x["pct_of_all_wider_msk_in_cluster"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(10.8, 6.3))
+    sports_bars = ax.barh(y - height / 2, sports, height=height, label="Sports-linked BTH pathway")
+    wider_bars = ax.barh(y + height / 2, wider, height=height, label="Wider MSK non-Sports-linked candidate")
+
+    for bars, values in [(sports_bars, sports), (wider_bars, wider)]:
+        for bar, value in zip(bars, values):
+            if np.isfinite(value):
+                ax.text(value, bar.get_y() + bar.get_height() / 2, f" {value:.1f}%", va="center", fontsize=9)
+
+    labels = [
+        f"C{int(c)}: {guide.loc[int(c), 'phenotype_label']}"
+        for c in x["UtilisationCluster"]
+    ]
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_title("Pathway groups across baseline utilisation phenotypes", loc="left", fontweight="bold")
+    ax.set_xlabel("Share of each analysis group (%)")
+    ax.set_ylabel("")
+    ax.legend(frameon=False)
+    ax.set_xlim(left=0)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+def _plot_followup_by_cluster(
+    trajectory: pd.DataFrame,
+    outcome_key: str,
+    phenotype_guide: pd.DataFrame,
+    path: Path,
+) -> None:
+    """Plot observed crude follow-up rates across clearly labelled baseline phenotypes."""
     sub = trajectory[
         trajectory["outcome"].eq(outcome_key)
         & trajectory["period"].eq("Follow-up")
@@ -648,32 +938,64 @@ def _plot_followup_by_cluster(trajectory: pd.DataFrame, outcome_key: str, path: 
     if sub.empty:
         return
 
-    fig, ax = plt.subplots(figsize=(9.5, 5.8))
-    for group, group_sub in sub.groupby("group"):
-        group_sub = group_sub.sort_values("UtilisationCluster")
-        ax.plot(
-            group_sub["UtilisationCluster"],
-            group_sub["rate_per_100_person_years"],
-            marker="o",
-            label=str(group),
+    guide = phenotype_guide.set_index("UtilisationCluster")
+    clusters = sorted(sub["UtilisationCluster"].astype(int).unique())
+    x = np.arange(len(clusters), dtype=float)
+
+    fig, ax = plt.subplots(figsize=(10.8, 6.2))
+    preferred_order = [
+        "Sports-linked BTH pathway",
+        "Wider MSK non-Sports-linked candidate",
+    ]
+    available_groups = sub["group"].astype(str).drop_duplicates().tolist()
+    group_order = [g for g in preferred_order if g in available_groups]
+    group_order += [g for g in available_groups if g not in group_order]
+
+    for group in group_order:
+        values = []
+        for cluster in clusters:
+            row = sub[
+                sub["UtilisationCluster"].eq(cluster)
+                & sub["group"].astype(str).eq(group)
+            ]
+            values.append(
+                float(row["rate_per_100_person_years"].iloc[0])
+                if not row.empty
+                else np.nan
+            )
+        ax.plot(x, values, marker="o", linewidth=2, label=group)
+
+    labels = []
+    for cluster in clusters:
+        phenotype = (
+            str(guide.loc[cluster, "phenotype_short_label"])
+            if cluster in guide.index
+            else f"Cluster {cluster}"
         )
-    label = str(sub["outcome_label"].iloc[0])
-    ax.set_title(f"Follow-up {label.lower()} by baseline utilisation phenotype", loc="left", fontweight="bold")
-    ax.set_xlabel("Baseline utilisation cluster")
-    ax.set_ylabel("Crude events per 100 person-years")
-    ax.set_xticks(sorted(sub["UtilisationCluster"].unique()))
+        labels.append(f"C{cluster}\n{phenotype}")
+
+    title_map = {
+        "ED": "Follow-up ED attendance by baseline utilisation phenotype",
+        "Inpatient": "Follow-up inpatient admissions by baseline utilisation phenotype",
+        "EmergencyInpatient": "Follow-up emergency inpatient admissions by baseline utilisation phenotype",
+    }
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_title(title_map.get(outcome_key, "Follow-up utilisation by baseline utilisation phenotype"), loc="left", fontweight="bold")
+    ax.set_xlabel("")
+    ax.set_ylabel("Crude follow-up events per 100 person-years")
     ax.legend(frameon=False)
+    ax.set_ylim(bottom=0)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    fig.savefig(path, dpi=220, bbox_inches="tight")
+    fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")
     plt.close(fig)
-
 
 def run_clustering(
     workflow_path: str | Path = "config/workflow_tre.yaml",
     clustering_config_path: str | Path = "config/clustering_tre.yaml",
 ) -> dict[str, pd.DataFrame]:
-    """Run the exploratory real-data clustering layer, diagnostics, sensitivities and phenotype audit."""
+    """Run the exploratory clustering layer, diagnostics, sensitivities and phenotype audit."""
     workflow = load_workflow_config(workflow_path)
     cfg = _load_clustering_config(clustering_config_path)
     section = cfg.get("clustering", {})
@@ -694,8 +1016,8 @@ def run_clustering(
         "EXPLORATORY BASELINE HEALTHCARE-UTILISATION CLUSTERING",
         purpose=(
             "Identify data-driven baseline utilisation phenotypes using ED, inpatient and emergency-inpatient "
-            "rates only; assess K=2..6 separation/stability; retain the prespecified report-facing K only if "
-            "real-data size/stability criteria pass; profile pathway membership and follow-up only after clusters are formed."
+            "rates only; assess the configured candidate K solutions; retain the prespecified report-facing K only if "
+            "the current data meet size/stability criteria; profile pathway membership and follow-up only after clusters are formed."
         ),
         inputs=[analysis_dir / "patient_outcomes.csv", clustering_config_path],
         outputs=[tables_dir, figures_dir, model_dir],
@@ -794,11 +1116,12 @@ def run_clustering(
         min_cluster_pct=min_cluster_pct,
         stability_seeds=stability_seeds,
     )
-    # Always calculate the data-driven solution from the current analytical data.
+    # Always calculate the data-driven solution from the current analysis data.
     auto_selected_k, auto_selection_reason = _choose_k(metrics, minimum_stability_ari)
 
-    # The report-facing K is a prespecified candidate, not a guaranteed solution.
-    # It must satisfy the configured cluster-size and stability criteria.
+    # A prespecified report-facing K is a candidate rather than a guaranteed solution.
+    # It is retained only when the current data meet the configured size and
+    # stability criteria.
     selection_mode = str(section.get("selection_mode", "prespecified_with_diagnostics")).lower()
     prespecified_k = int(section.get("prespecified_k", 4))
     fail_if_prespecified_inadequate = bool(section.get("fail_if_prespecified_inadequate", True))
@@ -819,19 +1142,19 @@ def run_clustering(
         if adequate:
             selected_k = prespecified_k
             selection_reason = (
-                f"prespecified K={prespecified_k} retained after size/stability checks; "
+                f"prespecified K={prespecified_k} retained after current-data size/stability checks; "
                 f"automatic diagnostic choice was K={auto_selected_k}"
             )
         elif fail_if_prespecified_inadequate:
             raise RuntimeError(
-                f"Prespecified K={prespecified_k} failed the configured cluster size/stability criteria. "
-                "Do not force an inadequate cluster solution. "
+                f"Prespecified K={prespecified_k} failed the current data cluster size/stability criteria. "
+                "Do not force a prespecified cluster structure onto data that fail the configured checks. "
                 f"Automatic diagnostic choice is K={auto_selected_k}."
             )
         else:
             selected_k = auto_selected_k
             selection_reason = (
-                f"prespecified K={prespecified_k} inadequate; fell back to automatic K={auto_selected_k}"
+                f"prespecified K={prespecified_k} inadequate on the current data; fell back to automatic K={auto_selected_k}"
             )
     else:
         raise ValueError(
@@ -857,10 +1180,12 @@ def run_clustering(
     centroids = _centroid_table(final_model, cluster_mapping, baseline_features)
     baseline_profiles = _baseline_profiles(analysis, baseline_features)
     characterisation = _cluster_characterisation(baseline_profiles, baseline_features)
+    phenotype_guide = _phenotype_guide(baseline_profiles, characterisation)
     followup_profiles = _followup_profiles(analysis)
     demographic_numeric = _demographic_numeric(analysis)
     categorical_profiles = _categorical_profiles(analysis)
     exposure_distribution, exposure_association = _exposure_distribution(analysis)
+    patient_profiles = _cluster_patient_profiles(analysis, phenotype_guide, exposure_distribution)
     trajectory, change_summary = _trajectory_tables(analysis)
 
     # Sensitivity: refit selected K without winsorisation to quantify dependence on the cap.
@@ -1003,11 +1328,13 @@ def run_clustering(
         "cluster_centroids_standardised": centroids,
         "cluster_baseline_profiles": baseline_profiles,
         "cluster_characterisation": characterisation,
+        "cluster_phenotype_guide": phenotype_guide,
         "cluster_followup_profiles": followup_profiles,
         "cluster_demographic_numeric": demographic_numeric,
         "cluster_categorical_profiles": categorical_profiles,
         "cluster_exposure_distribution": exposure_distribution,
         "cluster_exposure_association": exposure_association,
+        "cluster_patient_profile_summary": patient_profiles,
         "cluster_utilisation_trajectory": trajectory,
         "cluster_change_summary": change_summary,
         "clustering_sensitivity": sensitivity,
@@ -1021,7 +1348,17 @@ def run_clustering(
     # descriptions into one compact reviewer-facing table.  Labels remain
     # provisional until clinical/source review.
     clustering_key_findings = exposure_distribution.merge(
-        characterisation,
+        phenotype_guide[
+            [
+                "UtilisationCluster",
+                "patients",
+                "pct_of_analysis_population",
+                "phenotype_label",
+                "dominant_baseline_service",
+                "provisional_description",
+                "label_status",
+            ]
+        ],
         on=["UtilisationCluster", "patients", "pct_of_analysis_population"],
         how="left",
     )
@@ -1030,7 +1367,7 @@ def run_clustering(
     )
     outputs["clustering_key_findings"] = clustering_key_findings
 
-    # Save fitted artefacts inside the TRE for reproducibility.
+    # Save fitted artefacts for reproducibility within the development/TRE environment.
     joblib.dump(final_model, model_dir / "kmeans_model.joblib")
     joblib.dump(scaler, model_dir / "standard_scaler.joblib")
     artifact = {
@@ -1042,21 +1379,43 @@ def run_clustering(
         "selection_mode": selection_mode,
         "cluster_mapping": dict(zip(cluster_mapping["raw_cluster"], cluster_mapping["UtilisationCluster"])),
         "transform": "winsor upper tail -> log1p -> StandardScaler -> KMeans",
-        "note": "Cluster centroids and labels are fitted from the current TRE analytical population.",
+        "note": "Cluster centroids are fitted from the data supplied to this run and must not be reused as fixed centroids for a different dataset.",
     }
     joblib.dump(artifact, model_dir / "clustering_artifact.joblib")
     (model_dir / "clustering_metadata.json").write_text(
         json.dumps(artifact, indent=2), encoding="utf-8"
     )
 
-    _plot_cluster_selection(metrics, selected_k, figures_dir / "cluster_selection_silhouette.png")
-    _plot_cluster_sizes(exposure_distribution, figures_dir / "cluster_size_distribution.png")
-    _plot_centroid_heatmap(centroids, baseline_features, figures_dir / "cluster_centroid_heatmap.png")
-    _plot_group_cluster_distribution(exposure_distribution, figures_dir / "analysis_group_cluster_distribution.png")
+    _plot_cluster_selection(
+        metrics,
+        selected_k,
+        figures_dir / "cluster_selection_silhouette.png",
+    )
+    _plot_cluster_sizes(
+        phenotype_guide,
+        figures_dir / "cluster_size_distribution.png",
+    )
+    _plot_centroid_heatmap(
+        centroids,
+        baseline_features,
+        phenotype_guide,
+        figures_dir / "cluster_centroid_heatmap.png",
+    )
+    _plot_baseline_profile_rates(
+        baseline_profiles,
+        phenotype_guide,
+        figures_dir / "cluster_baseline_profile_rates.png",
+    )
+    _plot_group_cluster_distribution(
+        exposure_distribution,
+        phenotype_guide,
+        figures_dir / "analysis_group_cluster_distribution.png",
+    )
     for outcome_key in DEFAULT_OUTCOME_MAP:
         _plot_followup_by_cluster(
             trajectory,
             outcome_key,
+            phenotype_guide,
             figures_dir / f"followup_{outcome_key.lower()}_by_baseline_cluster.png",
         )
 
@@ -1076,7 +1435,7 @@ def run_clustering(
     if np.isfinite(exclusive_ari):
         metric("mutually-exclusive feature ARI", f"{exclusive_ari:.4f}")
 
-    print("\nK=2..6 diagnostic comparison:")
+    print("\nCandidate-K diagnostic comparison (" + ", ".join(str(k) for k in candidate_k) + "):")
     dataframe_preview(
         metrics,
         columns=[
@@ -1093,8 +1452,24 @@ def run_clustering(
         columns=[
             "UtilisationCluster", "patients", "pct_of_analysis_population",
             "sports_linked_n", "wider_msk_n", "pct_of_all_sports_linked_in_cluster",
-            "pct_of_all_wider_msk_in_cluster", "dominant_baseline_service",
-            "provisional_description", "label_status",
+            "pct_of_all_wider_msk_in_cluster", "phenotype_label",
+            "dominant_baseline_service", "provisional_description", "label_status",
+        ],
+        max_rows=20,
+    )
+
+    audit_section("STAGE 09 PATIENT PROFILE SNAPSHOT")
+    dataframe_preview(
+        patient_profiles,
+        columns=[
+            "UtilisationCluster", "phenotype_label", "patients",
+            "age_years_median", "imd_decile_median",
+            "most_common_sex", "most_common_ethnicity", "most_common_geography",
+            "sports_linked_pct_within_cluster",
+            "baseline_ed_rate_per_100py", "baseline_inpatient_rate_per_100py",
+            "baseline_emergency_inpatient_rate_per_100py",
+            "followup_ed_rate_per_100py", "followup_inpatient_rate_per_100py",
+            "followup_emergency_inpatient_rate_per_100py",
         ],
         max_rows=20,
     )
@@ -1141,6 +1516,8 @@ def run_clustering(
             tables_dir / "clustering_summary.csv",
             tables_dir / "cluster_selection_metrics.csv",
             tables_dir / "clustering_key_findings.csv",
+            tables_dir / "cluster_phenotype_guide.csv",
+            tables_dir / "cluster_patient_profile_summary.csv",
             tables_dir / "cluster_exposure_association.csv",
             tables_dir / "clustering_sensitivity.csv",
         ],
@@ -1150,15 +1527,21 @@ def run_clustering(
             "Cluster-specific follow-up trajectories are descriptive and vulnerable to regression to the mean and sparse Sports-linked cells."
         ],
         config_path=clustering_config_path,
+        next_command="python scripts/check_translation_readiness.py",
     )
     stage_footer(
         stage_key="clustering",
         audit_dir=audit_dir,
         summary_path=summary_path,
-        qa_files=[tables_dir / "clustering_key_findings.csv", tables_dir / "cluster_selection_metrics.csv"],
+        qa_files=[
+            tables_dir / "clustering_key_findings.csv",
+            tables_dir / "cluster_patient_profile_summary.csv",
+            tables_dir / "cluster_selection_metrics.csv",
+        ],
         warnings=[
             f"{len(small_sports)} cluster(s) have fewer than {small_sports_threshold} Sports-linked patients for stable trajectory interpretation."
         ] if len(small_sports) else [],
+        next_command="python scripts/check_translation_readiness.py",
     )
 
     return outputs
