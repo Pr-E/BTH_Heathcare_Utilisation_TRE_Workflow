@@ -112,7 +112,3 @@ The descriptive directory additionally contains Table 1, missingness, baseline b
 Run `python scripts/review_audit_summary.py` after one or more stages to build the reviewer summary.
 
 ---
-
-## Release reminder
-
-Being aggregate does not automatically mean releasable. All requested outputs remain subject to the TRE's formal disclosure-control policy. Stage 10 is an internal pre-screen only.
