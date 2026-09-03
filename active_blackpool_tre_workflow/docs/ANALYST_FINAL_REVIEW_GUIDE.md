@@ -159,7 +159,7 @@ The aim is for the complete analytical run to be understandable without relying 
 ## Suggested review order
 
 1. `README.md`
-2. `docs/IAN_FINAL_REVIEW_GUIDE.md`
+2. `docs/ANALYST_FINAL_REVIEW_GUIDE.md`
 3. `config/pipeline_tre.yaml`
 4. `config/workflow_tre.yaml`
 5. `config/clustering_tre.yaml`
