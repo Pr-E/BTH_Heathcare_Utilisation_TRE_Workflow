@@ -168,4 +168,4 @@ Prespecified report-facing K=4 is retained only if real-data minimum size and st
 
 The design controls measured baseline differences only. Residual/unmeasured confounding may remain, including clinical severity, functional limitation, motivation, clinician judgement and social factors not captured in the available data.
 
-The current workflow should therefore use language such as **adjusted association**, **comparative trajectory**, or **differential change**, not confirmed Active Blackpool causal effect.
+The current workflow therefore use language such as **adjusted association**, **comparative trajectory**, or **differential change**, not confirmed Active Blackpool causal effect.
