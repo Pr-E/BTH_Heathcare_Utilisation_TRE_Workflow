@@ -17,7 +17,7 @@ The production workflow is configured to the six real BTH extracts already used 
 - `active_blackpool_inpatient_msk_sports.csv`;
 - `active_blackpool_only_msk_sports_ed.csv`.
 
-Healthcare patient identifiers are re-verified against the matching MSK cohort before linkage. The extract coverage start/end dates must come from the approved BTH/TRE coverage specification and are not inferred from observed event minima/maxima.
+Healthcare patient identifiers are re-verified against the matching MSK cohort before linkage. 
 
 ## 2. Analysis population
 
