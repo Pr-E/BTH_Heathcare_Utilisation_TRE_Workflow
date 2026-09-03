@@ -5,8 +5,8 @@ Use this as the formal handover checklist for the first real-data run.
 ## A. Source semantics
 
 - [x] Working source contrast identified from real filenames: wider MSK without Sports versus Sports-linked MSK pathway.
-- [ ] Operational meaning of the Sports-linked pathway record reviewed with the source owner for final reporting language.
-- [ ] Sports-linked source is not being mislabelled as confirmed programme treatment.
+- [x] Operational meaning of the Sports-linked pathway record reviewed with the source owner for final reporting language.
+- [ ] Sports-linked source is being mislabelled as confirmed programme treatment.
 - [ ] Approved real extract coverage start/end dates confirmed; the study window is taken from approved extract documentation.
 - [ ] `FirstMSKReferralDate` meaning confirmed.
 - [ ] `FirstMSKDate` meaning confirmed.
