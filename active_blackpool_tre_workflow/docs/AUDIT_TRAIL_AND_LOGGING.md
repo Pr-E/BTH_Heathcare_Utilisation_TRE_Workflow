@@ -67,7 +67,7 @@ The summaries contain:
 - exact next command;
 - explicit `patient_level_data_in_summary: false` marker.
 
-These summaries must never be populated with patient hashes, patient-level rows or free-text clinical content.
+These summaries are never populated with patient hashes, patient-level rows or free-text clinical content.
 
 ---
 
