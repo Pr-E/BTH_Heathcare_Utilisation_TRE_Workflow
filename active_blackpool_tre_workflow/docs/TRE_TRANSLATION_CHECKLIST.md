@@ -6,17 +6,17 @@ Use this as the formal handover checklist for the first real-data run.
 
 - [x] Working source contrast identified from real filenames: wider MSK without Sports versus Sports-linked MSK pathway.
 - [x] Operational meaning of the Sports-linked pathway record reviewed with the source owner for final reporting language.
-- [ ] Sports-linked source is being mislabelled as confirmed programme treatment.
-- [ ] Approved real extract coverage start/end dates confirmed; the study window is taken from approved extract documentation.
-- [ ] `FirstMSKReferralDate` meaning confirmed.
-- [ ] `FirstMSKDate` meaning confirmed.
-- [ ] `LastMSKDate` meaning confirmed.
+- [x] Sports-linked source is not being mislabelled as confirmed programme treatment.
+- [x] Approved real extract coverage start/end dates confirmed; the study window is taken from approved extract documentation.
+- [x] `FirstMSKReferralDate` meaning confirmed.
+- [x] `FirstMSKDate` meaning confirmed.
+- [x] `LastMSKDate` meaning confirmed.
 - [ ] Sports Centre programme-start/attendance fields reviewed if available.
 - [ ] Emergency admission coding reviewed with data dictionary.
 
 ## B. Schema/mapping
 
-- [ ] All six configured real TRE filenames are present: wider MSK, wider inpatient, wider ED, Sports-linked MSK, Sports inpatient and Sports ED.
+- [x] All six configured real TRE filenames are present: wider MSK, wider inpatient, wider ED, Sports-linked MSK, Sports inpatient and Sports ED.
 - [ ] `02_identifier_resolution_qa.csv` confirms patient-ID candidate overlap with the appropriate MSK reference cohort.
 - [ ] `03_identifier_resolution_qa.csv` reproduces the same identifier selection after cleaning.
 - [ ] ED attendance/event identifier is distinct from the selected patient identifier and has plausible uniqueness at attendance grain.
