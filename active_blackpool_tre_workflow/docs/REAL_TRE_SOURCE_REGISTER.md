@@ -41,8 +41,6 @@ Prior QA also identified duplicate `ReferralObservationId` warnings, structural 
 
 The Sports-linked MSK cohort supports a **Sports-linked BTH pathway membership** contrast. It does not by itself establish Active Blackpool programme start, attendance, completion, membership uptake or sustained activity.
 
-The available MSK dates can provide a source-relative analytical anchor, but the final meaning of `FirstMSKDate` must be confirmed with the source owner before the comparative model is treated as the final real-data analysis.
-
 ## Values that must be generated from the current TRE data
 
 The following are analysis results rather than fixed configuration and must be
