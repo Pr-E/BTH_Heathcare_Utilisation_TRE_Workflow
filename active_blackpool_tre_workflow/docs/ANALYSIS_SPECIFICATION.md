@@ -42,7 +42,7 @@ Default strategy: `source_relative_first_msk`.
 - Sports-linked group: `SportsAnchorFirstMSKDate`;
 - Wider MSK group: `WiderAnchorFirstMSKDate`.
 
-This is a **source-relative FirstMSKDate analytical time origin**. It must not be described as programme start unless the real-data source semantics are updated and validated.
+This is a **source-relative FirstMSKDate analytical time origin**. It's not described as programme start.
 
 ## 4. Windows
 
