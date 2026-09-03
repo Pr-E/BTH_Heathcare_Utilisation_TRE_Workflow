@@ -136,5 +136,5 @@ After any partial or complete run:
 python scripts/review_audit_summary.py
 ```
 
-See `docs/IAN_FINAL_REVIEW_GUIDE.md` and
+See `docs/ANALYST_FINAL_REVIEW_GUIDE.md` and
 `docs/TRE_STEP_BY_STEP_EXECUTION.md` for the reviewer and execution guides.
