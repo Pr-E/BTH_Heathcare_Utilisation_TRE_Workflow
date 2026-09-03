@@ -4,7 +4,7 @@
 
 Examine healthcare-utilisation trajectories among patients identified in the **Sports-linked BTH pathway** compared with a propensity-adjusted **Wider MSK non-Sports-linked population**, using linked routinely collected BTH data.
 
-The current real-data fallback design compares 12-month pre-index utilisation with up to 12-month post-index utilisation. The working exposure is pathway membership, not confirmed programme treatment.
+The current real-data fallback design compares 12-month pre-index utilisation with up to 12-month post-index utilisation. The working exposure is pathway membership i.e `FirstMSKDate`, not confirmed programme treatment.
 
 ## 1A. Real TRE source families
 
