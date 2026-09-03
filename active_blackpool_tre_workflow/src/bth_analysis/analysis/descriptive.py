@@ -3,12 +3,15 @@
 This layer describes the analytical population, missingness, source coverage,
 pathway timing, baseline utilisation and crude baseline/follow-up rates. It is
 separate from propensity adjustment and outcome modelling so descriptive facts
-are not confused with adjusted associations.
+are not confused with adjusted associations. Report-facing sex summaries are
+restricted to Female/Male; all source-coded levels remain available in detailed
+audit outputs and are not removed from the analytical dataset.
 """
 from __future__ import annotations
 
 from pathlib import Path
 import re
+import textwrap
 
 import matplotlib
 matplotlib.use("Agg")
@@ -62,6 +65,14 @@ OUTCOME_METRICS = (
     "EmergencyInpatient",
     "TotalHospital",
 )
+
+STRATIFIED_UTILISATION_VARS = [
+    "AgeBand",
+    "Sex",
+    "IMDQuintile",
+    "EthnicityNationalCodeDesc",
+    "PostcodeLAName",
+]
 
 EFFECTIVE_MISSING_ETHNICITY = {
     "not stated",
@@ -550,6 +561,214 @@ def _utilisation_summary(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _poisson_rate_ci(events: float, person_years: float, alpha: float = 0.05) -> tuple[float, float]:
+    """Return an exact Poisson confidence interval for a crude rate per 100 person-years."""
+    if not np.isfinite(person_years) or person_years <= 0 or not np.isfinite(events) or events < 0:
+        return np.nan, np.nan
+    # Import locally so Stage 07 remains lightweight at module import time.
+    from scipy.stats import chi2
+
+    k = float(events)
+    lower = 0.0 if k == 0 else 0.5 * chi2.ppf(alpha / 2, 2 * k) / person_years * 100
+    upper = 0.5 * chi2.ppf(1 - alpha / 2, 2 * (k + 1)) / person_years * 100
+    return float(lower), float(upper)
+
+
+def _utilisation_by_demographic(
+    df: pd.DataFrame,
+    stratifiers: list[str] | None = None,
+) -> pd.DataFrame:
+    """Describe crude hospital utilisation by one demographic dimension at a time.
+
+    The function intentionally avoids crossing demographic variables with one another.
+    This keeps cells interpretable, limits sparsity and preserves the descriptive role
+    of Stage 07. Missing levels are retained explicitly so event/person-time totals
+    reconcile to the overall utilisation table.
+    """
+    stratifiers = stratifiers or STRATIFIED_UTILISATION_VARS
+    rows: list[dict[str, object]] = []
+
+    for stratifier in stratifiers:
+        if stratifier not in df:
+            continue
+        temp = df.copy()
+        temp["__level"] = temp[stratifier].astype("string").fillna("<Missing>")
+
+        for (flag, group, level), sub in temp.groupby(
+            [EXPOSURE_COL, GROUP_COL, "__level"],
+            dropna=False,
+            observed=True,
+        ):
+            patients = int(sub["PatientID"].nunique())
+            for outcome in OUTCOME_METRICS:
+                for period in ("Baseline", "FollowUp"):
+                    count_col = f"{period}{outcome}Count"
+                    py_col = f"{period}PersonYears"
+                    if count_col not in sub or py_col not in sub:
+                        continue
+
+                    counts = _numeric(sub[count_col]).fillna(0)
+                    py = _numeric(sub[py_col]).fillna(0)
+                    events = float(counts.sum())
+                    person_years = float(py.sum())
+                    rate = events / person_years * 100 if person_years > 0 else np.nan
+                    lcl, ucl = _poisson_rate_ci(events, person_years)
+                    with_event = int(counts.gt(0).sum())
+                    zero_event = int(counts.eq(0).sum())
+
+                    rows.append(
+                        {
+                            "ExposureFlag": flag,
+                            "AnalysisGroup": group,
+                            "stratifier": stratifier,
+                            "stratifier_label": DISPLAY_LABELS.get(stratifier, stratifier),
+                            "level": str(level),
+                            "period": period,
+                            "outcome": outcome,
+                            "outcome_label": DISPLAY_LABELS.get(outcome, outcome),
+                            "patients": patients,
+                            "patients_with_event_n": with_event,
+                            "patients_with_event_pct": _safe_pct(with_event, patients),
+                            "zero_event_patient_n": zero_event,
+                            "zero_event_patient_pct": _safe_pct(zero_event, patients),
+                            "events": events,
+                            "person_years": person_years,
+                            "rate_per_100_person_years": rate,
+                            "rate_lcl_95": lcl,
+                            "rate_ucl_95": ucl,
+                        }
+                    )
+
+    return pd.DataFrame(rows)
+
+
+def _demographic_prepost_change(stratified: pd.DataFrame) -> pd.DataFrame:
+    """Calculate crude baseline-to-follow-up rate changes within demographic levels."""
+    if stratified.empty:
+        return pd.DataFrame()
+
+    key = [
+        "ExposureFlag",
+        "AnalysisGroup",
+        "stratifier",
+        "stratifier_label",
+        "level",
+        "outcome",
+        "outcome_label",
+    ]
+    rate = stratified.pivot_table(
+        index=key,
+        columns="period",
+        values="rate_per_100_person_years",
+        aggfunc="first",
+    ).reset_index()
+    rate = rate.rename(
+        columns={
+            "Baseline": "baseline_rate_per_100_py",
+            "FollowUp": "followup_rate_per_100_py",
+        }
+    )
+    for col in ["baseline_rate_per_100_py", "followup_rate_per_100_py"]:
+        if col not in rate:
+            rate[col] = np.nan
+
+    rate["absolute_rate_change_per_100_py"] = (
+        rate["followup_rate_per_100_py"] - rate["baseline_rate_per_100_py"]
+    )
+    rate["relative_rate_change_pct"] = np.where(
+        rate["baseline_rate_per_100_py"].gt(0),
+        rate["absolute_rate_change_per_100_py"] / rate["baseline_rate_per_100_py"] * 100,
+        np.nan,
+    )
+    return rate
+
+
+def _validate_demographic_utilisation(
+    stratified: pd.DataFrame,
+    overall: pd.DataFrame,
+) -> pd.DataFrame:
+    """Reconcile demographic summaries to the overall Stage 07 utilisation totals."""
+    rows: list[dict[str, object]] = []
+    if stratified.empty:
+        return pd.DataFrame([
+            {
+                "check": "stratified_output_nonempty",
+                "stratifier": "All",
+                "status": "FAIL",
+                "detail": "No demographic utilisation rows were produced.",
+            }
+        ])
+
+    key_cols = ["ExposureFlag", "AnalysisGroup", "stratifier", "level", "period", "outcome"]
+    duplicate_keys = int(stratified.duplicated(key_cols, keep=False).sum())
+    rows.append(
+        {
+            "check": "unique_output_keys",
+            "stratifier": "All",
+            "status": "PASS" if duplicate_keys == 0 else "FAIL",
+            "detail": f"duplicate_rows={duplicate_keys}",
+        }
+    )
+
+    negative_rows = int(
+        (
+            _numeric(stratified["patients"]).lt(0)
+            | _numeric(stratified["events"]).lt(0)
+            | _numeric(stratified["person_years"]).lt(0)
+        ).sum()
+    )
+    rows.append(
+        {
+            "check": "nonnegative_denominators_and_events",
+            "stratifier": "All",
+            "status": "PASS" if negative_rows == 0 else "FAIL",
+            "detail": f"negative_rows={negative_rows}",
+        }
+    )
+
+    overall_key = ["ExposureFlag", "group", "period", "outcome"]
+    reference = overall[overall_key + ["patients", "total_events", "total_person_years"]].copy()
+    reference = reference.rename(columns={"group": "AnalysisGroup"})
+
+    for stratifier in stratified["stratifier"].drop_duplicates():
+        sub = stratified[stratified["stratifier"].eq(stratifier)]
+        aggregate = (
+            sub.groupby(["ExposureFlag", "AnalysisGroup", "period", "outcome"], as_index=False)
+            .agg(
+                patients=("patients", "sum"),
+                events=("events", "sum"),
+                person_years=("person_years", "sum"),
+            )
+        )
+        merged = reference.merge(
+            aggregate,
+            on=["ExposureFlag", "AnalysisGroup", "period", "outcome"],
+            how="outer",
+            validate="one_to_one",
+        )
+        patient_diff = (_numeric(merged["patients_y"]) - _numeric(merged["patients_x"])).abs().max()
+        event_diff = (_numeric(merged["events"]) - _numeric(merged["total_events"])).abs().max()
+        py_diff = (_numeric(merged["person_years"]) - _numeric(merged["total_person_years"])).abs().max()
+
+        patient_diff = float(patient_diff) if pd.notna(patient_diff) else np.inf
+        event_diff = float(event_diff) if pd.notna(event_diff) else np.inf
+        py_diff = float(py_diff) if pd.notna(py_diff) else np.inf
+        passed = patient_diff == 0 and event_diff < 1e-8 and py_diff < 1e-8
+        rows.append(
+            {
+                "check": "reconciles_to_overall_utilisation",
+                "stratifier": stratifier,
+                "status": "PASS" if passed else "FAIL",
+                "detail": (
+                    f"max_patient_diff={patient_diff:g}; "
+                    f"max_event_diff={event_diff:.3g}; max_person_year_diff={py_diff:.3g}"
+                ),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def _prepost_change(utilisation: pd.DataFrame) -> pd.DataFrame:
     """Calculate crude within-group baseline-to-follow-up changes."""
     if utilisation.empty:
@@ -691,26 +910,61 @@ def _table1(
         )
 
     for variable in ["Sex", "AgeBand", "EthnicityNationalCodeDesc", "IMDQuintile", "PostcodeLAName"]:
-        x = categorical[categorical["variable"].eq(variable)]
+        x = categorical[categorical["variable"].eq(variable)].copy()
         if x.empty:
             continue
-        for level in x["level"].drop_duplicates():
+
+        # Report-facing sex summaries show only Female and Male. Any additional
+        # source-coded sex category (for example, an indeterminate/other code)
+        # remains in the full categorical and balance outputs for auditability
+        # and is not recoded or removed from the analytical dataset.
+        if variable == "Sex":
+            sex_norm = x["level"].astype(str).str.strip().str.lower()
+            x = x[sex_norm.isin({"f", "female", "m", "male"})].copy()
+            x["display_level"] = np.where(
+                x["level"].astype(str).str.strip().str.lower().isin({"f", "female"}),
+                "F",
+                "M",
+            )
+        else:
+            x["display_level"] = x["level"].astype(str)
+
+        for display_level in x["display_level"].drop_duplicates():
+            level_rows = x[x["display_level"].eq(display_level)]
             values = {}
             for flag in (0, 1):
-                row = x[(x["ExposureFlag"].eq(flag)) & (x["level"].eq(level))]
+                row = level_rows[level_rows["ExposureFlag"].eq(flag)]
                 values[flag] = (
-                    f"{int(row['n'].iloc[0]):,} ({row['pct'].iloc[0]:.1f}%)"
+                    f"{int(row['n'].sum()):,} ({row['pct'].sum():.1f}%)"
                     if not row.empty
                     else "0 (0.0%)"
                 )
-            smd_row = balance[(balance["variable"].eq(variable)) & (balance["level"].astype(str).eq(str(level)))]
+
+            if variable == "Sex":
+                raw_levels = level_rows["level"].astype(str).tolist()
+                smd_candidates = balance[
+                    balance["variable"].eq(variable)
+                    & balance["level"].astype(str).isin(raw_levels)
+                ]
+                smd_value = (
+                    smd_candidates.loc[smd_candidates["abs_smd"].idxmax(), "smd"]
+                    if not smd_candidates.empty
+                    else np.nan
+                )
+            else:
+                smd_row = balance[
+                    balance["variable"].eq(variable)
+                    & balance["level"].astype(str).eq(str(display_level))
+                ]
+                smd_value = smd_row["smd"].iloc[0] if not smd_row.empty else np.nan
+
             rows.append(
                 {
                     "Characteristic": DISPLAY_LABELS.get(variable, variable),
-                    "Level": str(level),
+                    "Level": str(display_level),
                     comparison_name: values[0],
                     sports_name: values[1],
-                    "SMD": smd_row["smd"].iloc[0] if not smd_row.empty else np.nan,
+                    "SMD": smd_value,
                 }
             )
     return pd.DataFrame(rows)
@@ -857,7 +1111,20 @@ def _save_grouped_horizontal_bar(
         pivot = pivot.sort_values(1, ascending=True)
 
     # Preserve natural ordering for the pre-defined reporting categories.
-    if variable == "AgeBand":
+    # The report-facing sex figure displays only Female/Male categories. Any
+    # additional source-coded sex category is retained in the underlying tables
+    # and audit outputs rather than silently recoded.
+    if variable == "Sex":
+        female_levels = [v for v in pivot.index if str(v).strip().lower() in {"f", "female"}]
+        male_levels = [v for v in pivot.index if str(v).strip().lower() in {"m", "male"}]
+        sex_levels = female_levels[:1] + male_levels[:1]
+        if sex_levels:
+            pivot = pivot.reindex(sex_levels)
+            pivot.index = [
+                "F" if str(v).strip().lower() in {"f", "female"} else "M"
+                for v in pivot.index
+            ]
+    elif variable == "AgeBand":
         order = [v for v in ["16–34", "35–49", "50–64", "65–74", "75+"] if v in pivot.index]
         pivot = pivot.reindex(order)
     elif variable == "IMDQuintile":
@@ -913,7 +1180,13 @@ def _plot_utilisation_rates(
     utilisation: pd.DataFrame,
     figure_dir: Path,
 ) -> list[dict[str, str]]:
-    """Plot all crude baseline/follow-up utilisation rates in one comparison figure."""
+    """Plot crude baseline/follow-up utilisation with rate labels only.
+
+    The bar height is the crude rate per 100 person-years. To keep the figure
+    simple for stakeholder review, confidence-interval error bars and raw event
+    counts are not drawn on the figure. Event counts and confidence intervals
+    remain available in the Stage 07 CSV outputs for audit and interpretation.
+    """
     if utilisation.empty:
         return []
 
@@ -921,11 +1194,12 @@ def _plot_utilisation_rates(
     outcome_labels = {
         "ED": "ED",
         "Inpatient": "Inpatient",
-        "EmergencyInpatient": "Emergency inpatient",
-        "TotalHospital": "Total hospital",
+        "EmergencyInpatient": "Emergency\ninpatient",
+        "TotalHospital": "Total\nhospital",
     }
 
-    # Use the two pathway groups in a fixed order so the figure is stable across runs.
+    # Fixed order and colours keep the overall and demographic utilisation
+    # figures visually consistent across synthetic and TRE runs.
     series_specs = [
         (0, "Baseline", "Wider MSK baseline", "#2F7FB8"),
         (0, "FollowUp", "Wider MSK follow-up", "#F28E2B"),
@@ -933,44 +1207,110 @@ def _plot_utilisation_rates(
         (1, "FollowUp", "Sports-linked follow-up", "#D62728"),
     ]
 
-    x = np.arange(len(outcome_order), dtype=float)
+    positions = np.arange(len(outcome_order), dtype=float)
     width = 0.19
     offsets = np.array([-1.5, -0.5, 0.5, 1.5]) * width
 
-    fig, ax = plt.subplots(figsize=(11.2, 6.4))
+    # Slightly wider than the original figure so rate labels remain readable
+    # even when all four rates within an outcome are similar.
+    fig, ax = plt.subplots(figsize=(13.5, 7.0))
+    max_rate = 0.0
+    plotted_any = False
 
-    for offset, (flag, period, label, colour) in zip(offsets, series_specs):
-        values = []
+    # Alternate label heights for neighbouring bars. This prevents labels from
+    # colliding when rates are very similar, particularly for ED utilisation.
+    label_offsets_points = [4, 14, 4, 14]
+
+    for series_index, (offset, (flag, period, label, colour)) in enumerate(
+        zip(offsets, series_specs)
+    ):
+        rates: list[float] = []
+        observed: list[bool] = []
+
         for outcome in outcome_order:
             row = utilisation[
                 utilisation[EXPOSURE_COL].eq(flag)
                 & utilisation["period"].eq(period)
                 & utilisation["outcome"].eq(outcome)
             ]
-            values.append(
+
+            if row.empty:
+                rates.append(np.nan)
+                observed.append(False)
+                continue
+
+            rate = (
                 float(row["rate_per_100_person_years"].iloc[0])
-                if not row.empty
+                if pd.notna(row["rate_per_100_person_years"].iloc[0])
                 else np.nan
             )
+            rates.append(rate)
+            observed.append(True)
 
-        ax.bar(
-            x + offset,
-            values,
+            if np.isfinite(rate):
+                max_rate = max(max_rate, rate)
+
+        rates_arr = np.asarray(rates, dtype=float)
+
+        bars = ax.bar(
+            positions + offset,
+            rates_arr,
             width=width,
             label=label,
             color=colour,
+            zorder=2,
         )
 
-    ax.set_xticks(x)
+        plotted_any = plotted_any or any(observed)
+
+        # Print only the crude rate above each observed bar. Raw event counts
+        # remain in utilisation_summary.csv and descriptive_key_findings.csv.
+        for bar, rate, exists in zip(bars, rates_arr, observed):
+            if not exists or not np.isfinite(rate):
+                continue
+
+            ax.annotate(
+                f"{rate:.1f}",
+                xy=(bar.get_x() + bar.get_width() / 2, rate),
+                xytext=(0, label_offsets_points[series_index]),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8.0,
+                fontweight="semibold",
+                clip_on=False,
+                zorder=3,
+            )
+
+    if not plotted_any:
+        plt.close(fig)
+        return []
+
+    ax.set_xticks(positions)
     ax.set_xticklabels([outcome_labels[o] for o in outcome_order])
+
     _style_axis(
         ax,
         title="Crude baseline and follow-up healthcare-utilisation rates",
-        xlabel="",
+        xlabel="Healthcare-utilisation outcome",
         ylabel="Events per 100 person-years",
     )
-    ax.legend(frameon=False, ncol=2, loc="upper left")
+
+    # Keep the legend inside the upper-left of the plotting area, matching the
+    # final report-facing layout requested for Stage 07.
+    ax.legend(
+        frameon=False,
+        ncol=2,
+        loc="upper left",
+    )
+
     ax.set_ylim(bottom=0)
+    if max_rate > 0:
+        # Reserve headroom for the legend and staggered labels while leaving the
+        # plotted rates unchanged.
+        ax.set_ylim(top=max_rate * 1.25)
+    ax.margins(x=0.04)
+
     fig.tight_layout()
 
     filename = "crude_utilisation_rates.png"
@@ -986,11 +1326,211 @@ def _plot_utilisation_rates(
         {
             "file": filename,
             "purpose": (
-                "Crude baseline and follow-up ED, inpatient, emergency inpatient "
-                "and total hospital rates by analysis group."
+                "Crude baseline/follow-up ED, inpatient, emergency inpatient and "
+                "total hospital rates by analysis group, with rate labels."
             ),
         }
     ]
+
+
+def _plot_demographic_total_hospital_rates(
+    stratified: pd.DataFrame,
+    figure_dir: Path,
+) -> list[dict[str, str]]:
+    """Create vertical total-hospital rate figures for each demographic dimension.
+
+    Bars show crude rates per 100 person-years and the point estimate is printed
+    above each observed bar. Confidence intervals remain available in the
+    demographic utilisation tables but are intentionally not drawn on the figures
+    to keep stakeholder-facing plots simple and avoid visual confusion. Missing
+    pathway/period combinations remain blank rather than being displayed as zero.
+    """
+    if stratified.empty:
+        return []
+
+    manifest: list[dict[str, str]] = []
+    series_specs = [
+        (0, "Baseline", "Wider MSK baseline", "#2F7FB8"),
+        (0, "FollowUp", "Wider MSK follow-up", "#F28E2B"),
+        (1, "Baseline", "Sports-linked baseline", "#2CA02C"),
+        (1, "FollowUp", "Sports-linked follow-up", "#D62728"),
+    ]
+
+    def _wrapped_label(value: object, width: int = 18) -> str:
+        """Wrap long category labels without changing their underlying values."""
+        text = str(value)
+        return "\n".join(textwrap.wrap(text, width=width)) if len(text) > width else text
+
+    for stratifier in STRATIFIED_UTILISATION_VARS:
+        x = stratified[
+            stratified["stratifier"].eq(stratifier)
+            & stratified["outcome"].eq("TotalHospital")
+        ].copy()
+        if x.empty:
+            continue
+
+        # Preserve clinically meaningful ordering for age and deprivation.
+        # For high-cardinality dimensions, show the 12 largest patient groups in
+        # the figure only; the full descriptive table is retained separately.
+        levels = list(x["level"].drop_duplicates())
+        if stratifier == "Sex":
+            female_levels = [v for v in levels if str(v).strip().lower() in {"f", "female"}]
+            male_levels = [v for v in levels if str(v).strip().lower() in {"m", "male"}]
+            levels = female_levels[:1] + male_levels[:1]
+        elif stratifier == "AgeBand":
+            natural = ["16–34", "35–49", "50–64", "65–74", "75+", "<Missing>"]
+            levels = [v for v in natural if v in levels]
+        elif stratifier == "IMDQuintile":
+            natural = [
+                "Q1 (most deprived)",
+                "Q2",
+                "Q3",
+                "Q4",
+                "Q5 (least deprived)",
+                "<Missing>",
+            ]
+            levels = [v for v in natural if v in levels]
+        elif len(levels) > 12:
+            denom = x.groupby("level")["patients"].max().sort_values(ascending=False)
+            levels = list(denom.head(12).index)
+
+        if not levels:
+            continue
+
+        x = x[x["level"].isin(levels)].copy()
+        positions = np.arange(len(levels), dtype=float)
+        width = 0.19
+        offsets = np.array([-1.5, -0.5, 0.5, 1.5]) * width
+
+        # Expand the canvas as the number of categories grows. Vertical bars are
+        # easier to compare across baseline/follow-up while wrapped tick labels
+        # keep ethnicity/geography figures readable.
+        fig_w = min(21.0, max(11.8, 2.0 * len(levels) + 3.5))
+        fig, ax = plt.subplots(figsize=(fig_w, 7.4))
+
+        max_rate = 0.0
+        plotted_any = False
+
+        for offset, (flag, period, label, colour) in zip(offsets, series_specs):
+            values: list[float] = []
+            observed: list[bool] = []
+
+            for level in levels:
+                row = x[
+                    x["ExposureFlag"].eq(flag)
+                    & x["period"].eq(period)
+                    & x["level"].eq(level)
+                ]
+                if row.empty:
+                    values.append(np.nan)
+                    observed.append(False)
+                    continue
+
+                rate = float(row["rate_per_100_person_years"].iloc[0])
+                values.append(rate)
+                observed.append(True)
+
+                if np.isfinite(rate):
+                    max_rate = max(max_rate, rate)
+
+            values_arr = np.asarray(values, dtype=float)
+
+            # NaNs for genuinely absent cells remain visually blank and are not
+            # misrepresented as zero rates.
+            bars = ax.bar(
+                positions + offset,
+                values_arr,
+                width=width,
+                label=label,
+                color=colour,
+                zorder=2,
+            )
+
+            plotted_any = plotted_any or any(observed)
+
+            # Print the crude point estimate directly above each observed bar.
+            # A true observed zero is labelled 0.0; absent cells receive no bar
+            # and no label.
+            for bar, rate, exists in zip(bars, values_arr, observed):
+                if not exists or not np.isfinite(rate):
+                    continue
+                ax.annotate(
+                    f"{rate:.1f}",
+                    xy=(bar.get_x() + bar.get_width() / 2, rate),
+                    xytext=(0, 4),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8.5,
+                    fontweight="semibold",
+                    bbox={
+                        "boxstyle": "round,pad=0.14",
+                        "facecolor": "white",
+                        "edgecolor": "none",
+                        "alpha": 0.78,
+                    },
+                    clip_on=False,
+                    zorder=3,
+                )
+
+        if not plotted_any:
+            plt.close(fig)
+            continue
+
+        ax.set_xticks(positions)
+        wrap_width = 16 if stratifier in {"EthnicityNationalCodeDesc", "PostcodeLAName"} else 20
+        if stratifier == "Sex":
+            display_levels = [
+                "F" if str(v).strip().lower() in {"f", "female"} else "M"
+                for v in levels
+            ]
+        else:
+            display_levels = levels
+        ax.set_xticklabels([_wrapped_label(v, width=wrap_width) for v in display_levels])
+
+        _style_axis(
+            ax,
+            title=f"Total hospital utilisation by {DISPLAY_LABELS.get(stratifier, stratifier).lower()}",
+            xlabel=DISPLAY_LABELS.get(stratifier, stratifier),
+            ylabel="Events per 100 person-years",
+        )
+
+        # Keep the legend inside the plotting area, in the same simple style as
+        # the overall crude-utilisation figure. Additional headroom is reserved
+        # so the legend does not obscure the bars or their rate labels.
+        ax.legend(
+            frameon=False,
+            ncol=2,
+            loc="upper left",
+        )
+
+        ax.set_ylim(bottom=0)
+        if max_rate > 0:
+            ax.set_ylim(top=max_rate * 1.30)
+        ax.margins(x=0.03)
+
+        fig.tight_layout()
+
+        filename = f"total_hospital_by_{_slug(stratifier)}.png"
+        fig.savefig(
+            figure_dir / filename,
+            dpi=220,
+            bbox_inches="tight",
+            facecolor="white",
+        )
+        plt.close(fig)
+        manifest.append(
+            {
+                "file": filename,
+                "purpose": (
+                    f"Vertical crude baseline/follow-up total hospital utilisation by "
+                    f"{DISPLAY_LABELS.get(stratifier, stratifier).lower()} and analysis group, "
+                    "with rate labels."
+                ),
+            }
+        )
+
+    return manifest
 
 
 def _plot_baseline_smd(balance: pd.DataFrame, path: Path, top_n: int = 20) -> None:
@@ -1082,6 +1622,14 @@ def _write_manifest(table_dir: Path, figure_manifest: list[dict[str, str]], tabl
         "pathway_timing_summary": "Source-defined referral-to-FirstMSKDate and FirstMSKDate-to-LastMSKDate interval distributions.",
         "pathway_timing_qa": "Temporal interval QA including negative/zero intervals.",
         "utilisation_summary": "Baseline/follow-up event burden, zero inflation, dispersion and crude rates; the four outcomes are displayed together in one crude-rate figure.",
+        "healthcare_utilisation_by_demographic": "Crude ED, inpatient, emergency inpatient and total-hospital utilisation by age band, sex, IMD quintile, ethnicity and geography, stratified one dimension at a time.",
+        "healthcare_utilisation_by_demographic_change": "Crude baseline-to-follow-up rate changes within each demographic level and analysis group.",
+        "healthcare_utilisation_by_demographic_qa": "Reconciliation checks proving each demographic stratification reproduces the overall patient, event and person-time totals.",
+        "utilisation_by_age_band": "Age-band-specific crude utilisation extract for report review.",
+        "utilisation_by_sex": "Female/Male crude utilisation extract for report review; other source-coded sex levels remain in the master demographic table for auditability.",
+        "utilisation_by_imd_quintile": "IMD-quintile-specific crude utilisation extract for report review.",
+        "utilisation_by_ethnicity": "Recorded-ethnicity-specific crude utilisation extract; interpret with the ethnicity completeness warning.",
+        "utilisation_by_geography": "Local-authority-specific crude utilisation extract for report review.",
         "prepost_change_summary": "Within-group crude baseline-to-follow-up utilisation changes.",
         "index_annual_summary": "Annual analytical-index distribution by group.",
         "index_monthly_summary": "Monthly analytical-index distribution by group.",
@@ -1120,7 +1668,8 @@ def run_descriptive(
         purpose=(
             "Describe the analytical population before propensity adjustment: cohort composition, "
             "baseline characteristics, missingness, source coverage, pathway timing, follow-up completeness, "
-            "crude hospital-utilisation rates, baseline/follow-up change and unadjusted baseline imbalance."
+            "crude hospital-utilisation rates, demographic-stratified utilisation, baseline/follow-up change "
+            "and unadjusted baseline imbalance."
         ),
         inputs=[analysis_dir / "patient_outcomes.csv", analysis_dir / "healthcare_event_ledger.csv"],
         outputs=[table_dir, figure_dir],
@@ -1164,6 +1713,14 @@ def run_descriptive(
     followup_observation = _followup_observation_summary(eligible)
     pathway_timing, pathway_timing_qa = _pathway_timing(eligible)
     utilisation = _utilisation_summary(eligible)
+    stratified_utilisation = _utilisation_by_demographic(eligible)
+    stratified_change = _demographic_prepost_change(stratified_utilisation)
+    stratified_qa = _validate_demographic_utilisation(stratified_utilisation, utilisation)
+    if not stratified_qa.empty and stratified_qa["status"].eq("FAIL").any():
+        failed = stratified_qa.loc[stratified_qa["status"].eq("FAIL"), ["check", "stratifier", "detail"]]
+        raise ValueError(
+            "Demographic utilisation QA failed:\n" + failed.to_string(index=False)
+        )
     prepost = _prepost_change(utilisation)
     # Calendar-time summaries are retained as QA tables because index-year
     # comparability matters for the propensity design; no index-timeline plot is produced.
@@ -1185,6 +1742,20 @@ def run_descriptive(
         "pathway_timing_summary": pathway_timing,
         "pathway_timing_qa": pathway_timing_qa,
         "utilisation_summary": utilisation,
+        "healthcare_utilisation_by_demographic": stratified_utilisation,
+        "healthcare_utilisation_by_demographic_change": stratified_change,
+        "healthcare_utilisation_by_demographic_qa": stratified_qa,
+        "utilisation_by_age_band": stratified_utilisation[stratified_utilisation["stratifier"].eq("AgeBand")].copy(),
+        # Report-facing sex extract is restricted to Female/Male only. The master
+        # healthcare_utilisation_by_demographic table retains every source-coded
+        # sex level so reconciliation and audit totals remain complete.
+        "utilisation_by_sex": stratified_utilisation[
+            stratified_utilisation["stratifier"].eq("Sex")
+            & stratified_utilisation["level"].astype(str).str.strip().str.lower().isin({"f", "female", "m", "male"})
+        ].copy(),
+        "utilisation_by_imd_quintile": stratified_utilisation[stratified_utilisation["stratifier"].eq("IMDQuintile")].copy(),
+        "utilisation_by_ethnicity": stratified_utilisation[stratified_utilisation["stratifier"].eq("EthnicityNationalCodeDesc")].copy(),
+        "utilisation_by_geography": stratified_utilisation[stratified_utilisation["stratifier"].eq("PostcodeLAName")].copy(),
         "prepost_change_summary": prepost,
         "index_annual_summary": annual_index,
         "index_monthly_summary": monthly_index,
@@ -1276,6 +1847,7 @@ def run_descriptive(
             figure_manifest.append({"file": filename, "purpose": f"{DISPLAY_LABELS.get(variable, variable)} distribution by analysis group."})
 
     figure_manifest.extend(_plot_utilisation_rates(utilisation, figure_dir))
+    figure_manifest.extend(_plot_demographic_total_hospital_rates(stratified_utilisation, figure_dir))
 
     _plot_baseline_smd(balance, figure_dir / "baseline_smd_top20.png")
     figure_manifest.append({"file": "baseline_smd_top20.png", "purpose": "Largest unadjusted baseline SMDs before propensity adjustment."})
@@ -1329,6 +1901,15 @@ def run_descriptive(
         max_rows=20,
     )
 
+    metric("demographic utilisation stratifiers", stratified_utilisation["stratifier"].nunique())
+    metric("demographic utilisation rows", len(stratified_utilisation))
+    print("\nDemographic-stratified utilisation QA:")
+    dataframe_preview(
+        stratified_qa,
+        columns=["check", "stratifier", "status", "detail"],
+        max_rows=12,
+    )
+
     print("\nCrude pre/post change summary:")
     dataframe_preview(
         prepost,
@@ -1361,6 +1942,9 @@ def run_descriptive(
             "analysis_eligible_patients": int(eligible["PatientID"].nunique()),
             "maximum_unadjusted_abs_smd": max_smd,
             "eda_review_flags_n": len(review_diagnostics),
+            "demographic_utilisation_stratifiers_n": int(stratified_utilisation["stratifier"].nunique()),
+            "demographic_utilisation_rows_n": int(len(stratified_utilisation)),
+            "demographic_utilisation_qa_failures_n": int(stratified_qa["status"].eq("FAIL").sum()),
             "programme_exposure_semantics_confirmed": programme_confirmed,
             "index_is_programme_start": index_is_programme_start,
         },
@@ -1371,13 +1955,19 @@ def run_descriptive(
             table_dir / "followup_observation_summary.csv",
             table_dir / "baseline_balance_smd.csv",
             table_dir / "utilisation_summary.csv",
+            table_dir / "healthcare_utilisation_by_demographic.csv",
+            table_dir / "healthcare_utilisation_by_demographic_change.csv",
+            table_dir / "healthcare_utilisation_by_demographic_qa.csv",
             table_dir / "prepost_change_summary.csv",
             table_dir / "eda_diagnostics.csv",
         ],
         warnings=[
             "All Stage 07 group differences are crude/unadjusted and must not be interpreted as programme effects.",
             "High effective ethnicity missingness includes uninformative categories such as Not Stated/Unknown, not only literal NA.",
-            "A large unadjusted SMD is a reason to proceed to the propensity design, not a failure of the descriptive stage."
+            "A large unadjusted SMD is a reason to proceed to the propensity design, not a failure of the descriptive stage.",
+            "Demographic-stratified utilisation is descriptive only; it is not evidence of subgroup treatment effects or effect modification.",
+            "Report-facing sex figures/Table 1 show Female and Male only; any additional source-coded sex level remains in detailed audit tables and is not used for a standalone report-facing estimate.",
+            "Small demographic cells and all candidate egress outputs remain subject to the TRE's formal disclosure-control policy."
         ],
         config_path=config_path,
     )
@@ -1385,7 +1975,11 @@ def run_descriptive(
         stage_key="descriptive",
         audit_dir=audit_dir,
         summary_path=summary_path,
-        qa_files=[table_dir / "descriptive_key_findings.csv", table_dir / "eda_diagnostics.csv"],
+        qa_files=[
+            table_dir / "descriptive_key_findings.csv",
+            table_dir / "healthcare_utilisation_by_demographic_qa.csv",
+            table_dir / "eda_diagnostics.csv",
+        ],
     )
 
     outputs["descriptive_key_findings"] = key_findings_table
